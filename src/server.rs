@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     net::SocketAddr,
-    ops::ControlFlow,
+    ops::{ControlFlow, Deref},
     sync::Arc,
     time::Duration,
 };
@@ -29,23 +29,32 @@ pub use tokio;
 pub use tracing;
 pub use tracing_subscriber;
 
-struct ApiState {
+struct ApiState<T: Send + Sync> {
     events_to_be_sent: RwLock<VecDeque<Event>>,
     connected_clients: RwLock<HashMap<SocketAddr, ConnectedClient>>,
-    processors: RwLock<Vec<Box<dyn Fn(serde_json::Value) -> Option<Event> + Send + Sync>>>,
+    state_processor:
+        RwLock<Option<Box<dyn Fn(&mut T, SocketAddr, String) -> Option<Event> + Send + Sync>>>,
+    processors: RwLock<Vec<Box<dyn Fn(&mut T, serde_json::Value) -> Option<Event> + Send + Sync>>>,
     routes: RwLock<HashMap<String, String>>,
+    state: RwLock<T>,
 }
 
-impl ApiState {
+impl<T: Send + Sync> ApiState<T> {
     fn new(
-        processors: Vec<Box<dyn Fn(serde_json::Value) -> Option<Event> + Send + Sync>>,
+        state_processor: Option<
+            Box<dyn Fn(&mut T, SocketAddr, String) -> Option<Event> + Send + Sync>,
+        >,
+        processors: Vec<Box<dyn Fn(&mut T, serde_json::Value) -> Option<Event> + Send + Sync>>,
         routes: HashMap<String, String>,
+        state: T,
     ) -> Self {
         Self {
             events_to_be_sent: RwLock::new(VecDeque::new()),
             connected_clients: RwLock::new(HashMap::new()),
+            state_processor: RwLock::new(state_processor),
             processors: RwLock::new(processors),
             routes: RwLock::new(routes),
+            state: RwLock::new(state),
         }
     }
 
@@ -98,6 +107,7 @@ pub struct UserContext {}
 pub enum ToServerEvent {
     Test(String),
     PageLoad { path: String },
+    RequestFullState { name: String },
     Custom(serde_json::Value),
 }
 
@@ -119,18 +129,32 @@ pub enum ToClientEvent {
         component_name: String,
         dom_id: Option<String>,
     },
+
+    Custom {
+        event: serde_json::Value,
+    },
 }
 
 #[derive(Default)]
-pub struct App {
-    processors: Vec<Box<dyn Fn(serde_json::Value) -> Option<Event> + Send + Sync>>,
+pub struct App<T: Default> {
+    state_processor: Option<Box<dyn Fn(&mut T, SocketAddr, String) -> Option<Event> + Send + Sync>>,
+    processors: Vec<Box<dyn Fn(&mut T, serde_json::Value) -> Option<Event> + Send + Sync>>,
     routes: HashMap<String, String>,
+    state: T,
 }
 
-impl App {
+impl<T: Default + Send + Sync + 'static> App<T> {
+    pub fn state_processor<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&mut T, SocketAddr, String) -> Option<Event> + Send + Sync + 'static,
+    {
+        self.state_processor = Some(Box::new(f));
+        self
+    }
+
     pub fn add_processor<F>(mut self, f: F) -> Self
     where
-        F: Fn(serde_json::Value) -> Option<Event> + Send + Sync + 'static,
+        F: Fn(&mut T, serde_json::Value) -> Option<Event> + Send + Sync + 'static,
     {
         self.processors.push(Box::new(f));
         self
@@ -142,8 +166,18 @@ impl App {
         self
     }
 
+    pub fn state(mut self, state: T) -> Self {
+        self.state = state;
+        self
+    }
+
     pub async fn serve(self) -> Result<(), Box<dyn std::error::Error>> {
-        let state = Arc::new(ApiState::new(self.processors, self.routes.clone()));
+        let state = Arc::new(ApiState::new(
+            self.state_processor,
+            self.processors,
+            self.routes.clone(),
+            self.state,
+        ));
 
         let cloned_state = state.clone();
         tokio::spawn(async move {
@@ -159,33 +193,54 @@ impl App {
                             // TODO: send to wasm module endpoint
                             tracing::info!("look at me i'm totally a real wasm module {event:?}");
 
-                            for processor in state.processors.read().await.iter() {
-                                match &event {
-                                    ToServerEvent::Test(_) => {}
-                                    ToServerEvent::PageLoad { path } => {
-                                        if let Some(component_name) =
-                                            state.routes.read().await.get(path)
-                                        {
-                                            pending_events.push(Event::ToSpecificClient {
-                                                who: from,
-                                                event: ToClientEvent::RenderComponent {
-                                                    component_name: component_name.clone(),
-                                                    dom_id: Some("test".to_string()),
-                                                },
-                                            });
-                                        }
+                            tracing::debug!("event: {event:?}");
+
+                            if let ToServerEvent::RequestFullState { name } = event {
+                                tracing::info!("{from} is requesting full state {name}");
+                                if let Some(state_processor) =
+                                    state.state_processor.read().await.deref()
+                                {
+                                    let mut state = state.state.write().await;
+                                    if let Some(event) = state_processor(&mut state, from, name) {
+                                        pending_events.push(event);
                                     }
-                                    ToServerEvent::Custom(value) => {
-                                        // TODO: async?
-                                        if let Some(event) = processor(value.clone()) {
-                                            pending_events.push(event);
+                                } else {
+                                    tracing::error!("no state processor registered");
+                                }
+                            } else {
+                                for processor in state.processors.read().await.iter() {
+                                    match &event {
+                                        ToServerEvent::Test(_) => {}
+                                        ToServerEvent::RequestFullState { .. } => {}
+                                        ToServerEvent::PageLoad { path } => {
+                                            if let Some(component_name) =
+                                                state.routes.read().await.get(path)
+                                            {
+                                                pending_events.push(Event::ToSpecificClient {
+                                                    who: from,
+                                                    event: ToClientEvent::RenderComponent {
+                                                        component_name: component_name.clone(),
+                                                        dom_id: Some("test".to_string()),
+                                                    },
+                                                });
+                                            }
+                                        }
+                                        ToServerEvent::Custom(value) => {
+                                            let mut state = state.state.write().await;
+
+                                            // TODO: async?
+                                            if let Some(event) =
+                                                processor(&mut state, value.clone())
+                                            {
+                                                pending_events.push(event);
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                         Event::ToAllClients(to_client_event) => {
-                            tracing::debug!("sending ToAllClients event {to_client_event:?}");
+                            // tracing::debug!("sending ToAllClients event {to_client_event:?}");
 
                             let mut clients = state.connected_clients.write().await;
                             for (who, client) in clients.iter_mut() {
@@ -261,7 +316,7 @@ async fn client_wasm() -> Wasm<Bytes> {
     Wasm(Bytes::from(
         // TODO: don't hardcode this
         include_bytes!(
-            "../examples/hello_server/target/wasm32-unknown-unknown/release/hello_server.wasm"
+            "../examples/hello_server/target/wasm32-unknown-unknown/debug/hello_server.wasm"
         )
         .to_vec(),
     ))
@@ -272,8 +327,8 @@ async fn index() -> Html<&'static str> {
 }
 
 // TODO: grab user context
-async fn ws_handler(
-    State(state): State<Arc<ApiState>>,
+async fn ws_handler<T: Send + Sync + 'static>(
+    State(state): State<Arc<ApiState<T>>>,
     ws: WebSocketUpgrade,
     user_agent: Option<TypedHeader<headers::UserAgent>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -301,10 +356,10 @@ async fn ws_handler(
     ws.on_upgrade(move |socket| handle_socket(socket, addr, state, events_from_main_bus_rx))
 }
 
-async fn handle_socket(
+async fn handle_socket<T: Send + Sync + 'static>(
     socket: WebSocket,
     who: SocketAddr,
-    state: Arc<ApiState>,
+    state: Arc<ApiState<T>>,
     mut events_rx: Receiver<ToClientEvent>,
 ) {
     let (mut sender, mut receiver) = socket.split();
@@ -347,7 +402,11 @@ async fn handle_socket(
     println!("Websocket context {who} destroyed");
 }
 
-async fn process_message(msg: Message, who: SocketAddr, state: &ApiState) -> ControlFlow<(), ()> {
+async fn process_message<T: Send + Sync>(
+    msg: Message,
+    who: SocketAddr,
+    state: &ApiState<T>,
+) -> ControlFlow<(), ()> {
     match msg {
         Message::Text(t) => {
             println!(">>> {who} sent str: {t:?}");

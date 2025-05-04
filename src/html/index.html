@@ -21,6 +21,10 @@
                         e.innerHTML = msg.html;
                     } else if (msg.type === "renderComponent") {
                         renderComponentAt(instance, msg.componentName, msg.domId ?? "test");
+                    } else if (msg.type === "custom") {
+                        (async () => {
+                            handle_custom_event(JSON.stringify(msg.event));
+                        })();
                     }
 
                 } catch (e) {
@@ -72,7 +76,9 @@
                     },
                     send_event_to_server: (ptr, len) => {
                         const msg = read_string(instance, ptr, len);
-                        s.send(msg);
+                        (async () => {
+                            await s.send(msg);
+                        })();
                     },
                 },
             };
@@ -97,6 +103,12 @@
                 instance.exports.rerender();
             }
 
+            function handle_custom_event(msg) {
+                const msg_str = write_string(instance, msg);
+                instance.exports.handle_custom_event(...Object.values(msg_str));
+                instance.exports.rerender();
+            }
+
             function renderComponentAt(instance, component_name, domId) {
                 const result_ptr = instance.exports.js_render_component(...Object.values(write_string(instance, component_name)));
 
@@ -109,7 +121,7 @@
                 const str_len = view.getInt32(result_ptr + 4, true);
 
                 const str = read_string(instance, str_ptr, str_len);
-                console.log(str);
+                //console.log(str);
 
                 const e = document.querySelector(`[data-pserve-id="${domId}"]`);
                 e.innerHTML = str;

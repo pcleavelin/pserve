@@ -1,11 +1,17 @@
+extern crate alloc;
+
 use crate::dom::{DomNodeBuilt, DomNodeBuiltBody, DomNodeUnbuilt, DomNodeUnbuiltBody};
+use alloc::rc::Rc;
 use core::{
     any::Any,
     cell::{LazyCell, Ref, RefCell, RefMut},
     panic::Location,
     sync::atomic::{AtomicU32, Ordering},
 };
+use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::str::FromStr;
 
 pub mod env {
     use serde::Serialize;
@@ -77,6 +83,23 @@ extern "C" fn call_fn_ptr(value: *mut u8, len: i32, ptr: *const Box<dyn Fn(&str)
 }
 
 #[unsafe(no_mangle)]
+extern "C" fn handle_custom_event(value: *mut u8, len: i32) {
+    let value = unsafe { String::from_raw_parts(value, len as usize, len as usize) };
+    let json_value: serde_json::Value = match serde_json::from_str(&value) {
+        Ok(value) => value,
+        Err(e) => {
+            env::log(&format!("failed to deserialize custom event: {e}: {value}"));
+            return;
+        }
+    };
+
+    let mut event_subscriptions = PERSISTENT_VALUES.event_subscriptions.borrow_mut();
+    for event in event_subscriptions.values_mut() {
+        event.set(json_value.clone());
+    }
+}
+
+#[unsafe(no_mangle)]
 extern "C" fn rerender() {
     for dom_id in PERSISTENT_VALUES.to_re_render.borrow_mut().drain() {
         {
@@ -133,13 +156,16 @@ extern "C" fn rerender() {
         }
 
         let html = render(dom_id);
-        env::log(&html);
+        // env::log(&html);
         env::update_dom(dom_id, &html);
     }
 }
 
 pub struct PersistentState {
     cell: LazyCell<RefCell<HashMap<Location<'static>, Box<dyn Any>>>>,
+    event_subscriptions: LazyCell<RefCell<HashMap<TypeId, Box<dyn BlahEvent + 'static>>>>,
+    // event_subscriptions: LazyCell<RefCell<Option<Box<dyn Any>>>>,
+    // event_subscriptions_update_func: LazyCell<RefCell<Option<Box<dyn Fn(serde_json::Value)>>>>,
     builders: LazyCell<RefCell<HashMap<u32, DomNodeUnbuilt>>>,
     built_nodes: LazyCell<RefCell<HashMap<u32, DomNodeBuilt>>>,
     to_re_render: LazyCell<RefCell<HashSet<u32>>>,
@@ -170,6 +196,7 @@ pub struct Signal<T: Clone> {
 pub struct SignalData<T: Clone> {
     value: T,
     registered_dom_nodes: Vec<u32>,
+    registered_dom_nodes_by_key: HashMap<u32, u32>,
 }
 
 impl<T: Clone> SignalData<T> {
@@ -177,6 +204,7 @@ impl<T: Clone> SignalData<T> {
         Self {
             value,
             registered_dom_nodes: Vec::new(),
+            registered_dom_nodes_by_key: HashMap::new(),
         }
     }
 }
@@ -189,10 +217,11 @@ impl<T: Clone> Signal<T> {
         // FIXME: yolo
         unsafe {
             (*self.inner).registered_dom_nodes.clear();
+            (*self.inner).registered_dom_nodes_by_key.clear();
         }
     }
 
-    pub fn get_mut(&mut self) -> &mut T {
+    fn get_mut(&mut self) -> &mut T {
         // FIXME: yolo
         unsafe { &mut (*self.inner).value }
     }
@@ -213,6 +242,22 @@ impl<T: Clone> Signal<T> {
         unsafe { (*self.inner).value.clone() }
     }
 
+    pub fn get_with_key(&self, index: u32) -> T {
+        let dom_id = current_dom_id();
+
+        if dom_id > 0 {
+            // FIXME: yolo
+            unsafe {
+                (*self.inner)
+                    .registered_dom_nodes_by_key
+                    .insert(index, dom_id);
+            }
+        }
+
+        // FIXME: yolo
+        unsafe { (*self.inner).value.clone() }
+    }
+
     #[track_caller]
     pub fn set(&self, value: T) {
         // FIXME: yolo
@@ -225,6 +270,10 @@ impl<T: Clone> Signal<T> {
             for dom_id in (*self.inner).registered_dom_nodes.iter().cloned() {
                 PERSISTENT_VALUES.to_re_render.borrow_mut().insert(dom_id);
             }
+
+            for (_, dom_id) in (*self.inner).registered_dom_nodes_by_key.iter() {
+                PERSISTENT_VALUES.to_re_render.borrow_mut().insert(*dom_id);
+            }
         }
     }
 }
@@ -232,17 +281,210 @@ impl<T: Clone> Signal<T> {
 #[track_caller]
 pub fn use_signal<T: Clone + 'static>(f: impl FnOnce() -> T) -> Signal<T> {
     let location = Location::caller();
+    use_signal_with_caller(f, *location)
+}
 
+fn use_signal_with_caller<T: Clone + 'static>(
+    f: impl FnOnce() -> T,
+    location: Location<'static>,
+) -> Signal<T> {
     let mut signal = persist_value(
         || Signal {
             inner: Box::into_raw(Box::new(SignalData::new(f()))),
         },
-        *location,
+        location,
     );
 
     signal.reset();
 
     signal
+}
+
+pub trait Blah {
+    type Full: serde::de::DeserializeOwned;
+    type Update: BlahUpdate + serde::de::DeserializeOwned;
+    type EventData;
+
+    fn name() -> String;
+    fn len(data: &Self::EventData) -> usize;
+
+    fn replace(&self, full: Self::Full, data: &mut Self::EventData);
+    fn apply_update(&self, update: Self::Update, data: &mut Self::EventData);
+}
+
+trait BlahEvent: Any {
+    fn as_any(&self) -> &dyn Any;
+
+    fn set(&mut self, value: serde_json::Value);
+}
+
+pub trait BlahUpdate {
+    fn data_type(&self) -> DataType;
+}
+
+pub enum DataType {
+    Single,
+    Multiple(Vec<u32>),
+}
+
+#[derive(Clone, Copy)]
+pub struct StateEvent<T: Blah + Clone + 'static>
+where
+    <T as Blah>::EventData: Default + Clone,
+{
+    event: T,
+    data: Signal<<T as Blah>::EventData>, // signal: Signal<Option<<T as Blah>::EventData>>,
+}
+
+impl<T: Blah + Clone> StateEvent<T>
+where
+    <T as Blah>::EventData: Default + Clone,
+{
+    pub fn get(&self) -> <T as Blah>::EventData {
+        self.data.get()
+    }
+
+    pub fn get_with_index(&self, index: u32) -> <T as Blah>::EventData {
+        self.data.get_with_key(index)
+    }
+
+    pub fn len(&self) -> usize {
+        let _ = self.data.get();
+
+        unsafe { T::len(&(*self.data.inner).value) }
+        // self.data.get_mut().len()
+    }
+}
+
+impl<T: Blah + Clone> BlahEvent for StateEvent<T>
+where
+    <T as Blah>::EventData: Default + Clone,
+{
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn set(&mut self, value: serde_json::Value) {
+        if let Ok(full) = serde_json::from_value::<<T as Blah>::Full>(value.clone()) {
+            env::log("got full state");
+
+            unsafe {
+                for dom_id in (*self.data.inner).registered_dom_nodes.iter().cloned() {
+                    PERSISTENT_VALUES.to_re_render.borrow_mut().insert(dom_id);
+                }
+                for dom_id in (*self.data.inner).registered_dom_nodes_by_key.values() {
+                    PERSISTENT_VALUES.to_re_render.borrow_mut().insert(*dom_id);
+                }
+            }
+
+            self.event.replace(full, &mut self.data.get_mut());
+        } else if let Ok(update) = serde_json::from_value::<<T as Blah>::Update>(value) {
+            env::log("got partial state");
+
+            match update.data_type() {
+                DataType::Single => unsafe {
+                    for dom_id in (*self.data.inner).registered_dom_nodes.iter().cloned() {
+                        PERSISTENT_VALUES.to_re_render.borrow_mut().insert(dom_id);
+                    }
+                },
+                DataType::Multiple(keys) => unsafe {
+                    for dom_id in (*self.data.inner).registered_dom_nodes.iter().cloned() {
+                        PERSISTENT_VALUES.to_re_render.borrow_mut().insert(dom_id);
+                    }
+                    for (_, dom_id) in (*self.data.inner)
+                        .registered_dom_nodes_by_key
+                        .iter()
+                        .filter(|(key, _)| keys.contains(key))
+                    {
+                        PERSISTENT_VALUES.to_re_render.borrow_mut().insert(*dom_id);
+                    }
+                },
+            }
+
+            let mut data = self.data.get_mut();
+            self.event.apply_update(update, &mut data);
+        }
+    }
+}
+
+#[track_caller]
+pub fn use_state_event<
+    T: Blah + Clone + 'static,
+    // T: for<'a> From<&'a str> + Clone + Copy + Eq + Hash + 'static,
+    // D: serde::de::DeserializeOwned + Clone + 'static,
+>(
+    event: T,
+) -> StateEvent<T>
+where
+    <T as Blah>::EventData: Default + Clone,
+{
+    let location = Location::caller();
+    // let signal = use_signal_with_caller(|| None::<D>, *location);
+    // let event_subscriptions =
+    //     persist_value_here(|| Rc::new(RefCell::new(HashMap::<T, StateEvent<_, _>>::new())));
+
+    // if PERSISTENT_VALUES.event_subscriptions.borrow().is_none() {
+    //     PERSISTENT_VALUES
+    //         .event_subscriptions
+    //         .borrow_mut()
+    //         // .replace(HashMap::<TypeId, StateEvent<T, D>>::new());
+    //         .replace(HashMap::<TypeId, Box<dyn BlahEvent>>::new());
+    //
+    //     // PERSISTENT_VALUES.event_subscriptions_update_func.borrow_mut().replace(
+    //     //     Box::new(|value| {
+    //     //         if let Some(state_type) = value.get("type") {
+    //     //             let state_type = T::from(&state_type.as_str().unwrap());
+    //     //             if let Some(event_subscriptions) = PERSISTENT_VALUES.event_subscriptions.borrow_mut().as_mut() {
+    //     //                 let event_subscriptions = event_subscriptions
+    //     //                     .downcast_mut::<HashMap<T, StateEvent<T, D>>>()
+    //     //                     .expect("`use_state_event` must always be called with the same type parameters");
+    //     //                 if let Some(mut state_event) = event_subscriptions.get(&state_type).cloned() {
+    //     //                     match serde_json::from_value(value.clone()) {
+    //     //                         Ok(state) => state_event.set(state),
+    //     //                         Err(e) => {
+    //     //                             env::log(&format!("failed to deserialize state event: {e}: {value}"));
+    //     //                         }
+    //     //                     }
+    //     //                 }
+    //     //             }
+    //     //         }
+    //     //     }),
+    //     // );
+    // }
+
+    let mut event_subscriptions = PERSISTENT_VALUES.event_subscriptions.borrow_mut();
+    // let event_subscriptions = event_subscriptions
+    //     .downcast_mut::<HashMap<TypeId, Box<dyn BlahEvent>>>()
+    //     .expect("`use_state_event` must always be called with the same type parameters");
+
+    if let Some(state_event) = event_subscriptions.get(&TypeId::of::<T>()) {
+        let state_event = (*state_event)
+            .as_any()
+            .downcast_ref::<StateEvent<T>>()
+            .unwrap();
+
+        return state_event.clone();
+    } else {
+        let data = SignalData::new(<T as Blah>::EventData::default());
+        let state_event = StateEvent {
+            event,
+            data: Signal {
+                inner: Box::into_raw(Box::new(data)),
+            },
+        };
+
+        event_subscriptions.insert(TypeId::of::<T>(), Box::new(state_event.clone()));
+
+        // TODO: don't hide to server event behind non-wasm arch flag
+        #[derive(serde::Serialize)]
+        #[serde(tag = "type", rename_all = "camelCase")]
+        enum Event {
+            RequestFullState { name: String },
+        }
+        env::send_event_to_server(&Event::RequestFullState { name: T::name() }).unwrap();
+
+        state_event
+    }
 }
 
 // NOTE: This is WASM so its probably fine lol
@@ -254,6 +496,8 @@ pub static CURRENT_SCOPE_DOM_ID: AtomicU32 = AtomicU32::new(0);
 
 pub static PERSISTENT_VALUES: PersistentState = PersistentState {
     cell: LazyCell::new(|| RefCell::new(HashMap::new())),
+    event_subscriptions: LazyCell::new(|| RefCell::new(HashMap::new())),
+    // event_subscriptions_update_func: LazyCell::new(|| RefCell::new(None)),
     builders: LazyCell::new(|| RefCell::new(HashMap::new())),
     built_nodes: LazyCell::new(|| RefCell::new(HashMap::new())),
     to_re_render: LazyCell::new(|| RefCell::new(HashSet::new())),
@@ -269,6 +513,12 @@ pub fn persist_value<T: Clone + 'static>(f: impl FnOnce() -> T, location: Locati
         values.insert(location, Box::new(value.clone()));
         value
     }
+}
+
+#[track_caller]
+fn persist_value_here<T: Clone + 'static>(f: impl FnOnce() -> T) -> T {
+    let location = Location::caller();
+    persist_value(f, *location)
 }
 
 pub fn next_dom_id() -> u32 {

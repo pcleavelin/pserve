@@ -1,7 +1,7 @@
-use pserve::client::{Signal, use_signal};
+use pserve::client::{Signal, StateEvent, use_signal, use_state_event};
 use pserve::dom::*;
 
-use crate::ClientEvent;
+use crate::{CheckBoxStateEvent, ClientEvent, MemeListStateEvent, NUMBER_OF_CHECKBOXES};
 
 macro_rules! component_handler {
     ($($name:literal => $component:ident),* $(,)?) => {
@@ -45,6 +45,7 @@ component_handler! {
     "home_page" => home_page,
     "meme_list" => meme_list,
     "server_communicator" => server_communicator,
+    "checkboxes" => checkboxes,
 }
 
 fn server_communicator() -> DomNodeBuilder {
@@ -124,14 +125,7 @@ fn home_page() -> DomNodeBuilder {
 }
 
 fn meme_list() -> DomNodeBuilder {
-    let memes: Signal<Vec<String>> = use_signal(|| {
-        vec![
-            "React".to_string(),
-            "Rust".to_string(),
-            "Dioxus".to_string(),
-            "Leptos".to_string(),
-        ]
-    });
+    let memes = use_state_event(MemeListStateEvent);
     let meme_entry = use_signal(|| "".to_string());
 
     DomNodeBuilder::default()
@@ -139,12 +133,11 @@ fn meme_list() -> DomNodeBuilder {
         .push("ul", move || {
             let mut n = DomNodeBuilder::default();
 
-            let memes = memes.get();
-            for meme in memes.into_iter() {
+            for i in 0..memes.len() {
                 n = n.push("li", move || {
-                    DomNodeBuilder::default().push("p", {
-                        let meme = meme.clone();
-                        move || meme.as_str().into()
+                    DomNodeBuilder::default().push("p", move || {
+                        let memes = memes.get_with_index(i as u32);
+                        memes.get(i).unwrap().into()
                     })
                 });
             }
@@ -155,13 +148,66 @@ fn meme_list() -> DomNodeBuilder {
         .on_input(move |value| meme_entry.set(value.to_string()))
         .push("button", || "Add meme".into())
         .on_click(move |_| {
-            let new_meme: String = meme_entry.get().clone();
-            let mut more_memes = memes.get();
-            more_memes.push(new_meme);
-            memes.set(more_memes);
+            let new_meme = meme_entry.get();
+            pserve::client::env::send_event_to_server(&ClientEvent::AddMeme { meme: new_meme })
+                .unwrap();
 
             // TODO: support inline pushing
             // memes.get_mut().push(new_meme);
             meme_entry.set("".to_string());
         })
+}
+
+fn checkboxes() -> DomNodeBuilder {
+    let check_boxes = use_state_event(CheckBoxStateEvent);
+
+    DomNodeBuilder::default().push("div", move || {
+        let mut n = DomNodeBuilder::default();
+
+        n = n.push("p", || "A lotta Checkboxes".into());
+
+        for i in 0..NUMBER_OF_CHECKBOXES {
+            let check_boxes = check_boxes.clone();
+
+            n = n.push("div", move || {
+                let mut n = DomNodeBuilder::default();
+
+                for j in 0..NUMBER_OF_CHECKBOXES {
+                    let check_boxes = check_boxes.clone();
+                    n = n.push("span", move || {
+                        let mut n = DomNodeBuilder::default()
+                            .push("input", || "".into())
+                            .attr("type", "checkbox")
+                            .on_click(move |_| {
+                                pserve::client::env::log(&format!(
+                                    "click {}",
+                                    i * NUMBER_OF_CHECKBOXES + j
+                                ));
+                                let msg = ClientEvent::ToggleCheckBox {
+                                    id: (i * NUMBER_OF_CHECKBOXES + j) as u32,
+                                };
+
+                                pserve::client::env::send_event_to_server(&msg).unwrap();
+                            });
+
+                        let check_boxes =
+                            check_boxes.get_with_index((i * NUMBER_OF_CHECKBOXES + j) as u32);
+
+                        if check_boxes
+                            .get(i * NUMBER_OF_CHECKBOXES + j)
+                            .is_some_and(|b| *b)
+                        {
+                            n = n.attr("checked", "");
+                        }
+
+                        n
+                    });
+                }
+
+                n
+            });
+        }
+
+        n
+    })
 }
