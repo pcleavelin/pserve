@@ -5,6 +5,20 @@ use crate::{CheckBoxStateEvent, ClientEvent, MemeListStateEvent, NUMBER_OF_CHECK
 
 macro_rules! component_handler {
     ($($name:literal => $component:ident),* $(,)?) => {
+        // TODO: figure out away to not have to make users create this function themselves
+        #[unsafe(no_mangle)]
+        extern "C" fn js_render_component(fn_name: *mut u8, len: usize) -> *const u8 {
+            let fn_name = unsafe { String::from_raw_parts(fn_name, len, len) };
+
+            match render_component(&fn_name) {
+                Some(html) => unsafe {
+                    pserve::client::RENDER_RESULT = pserve::client::RenderResult::from(html);
+                    &raw const pserve::client::RENDER_RESULT as *const _ as *const u8
+                },
+                None => std::ptr::null(),
+            }
+        }
+
         fn render_component(msg: &str) -> Option<String> {
             pserve::client::env::log(&msg);
 
@@ -25,20 +39,6 @@ macro_rules! component_handler {
             }
         }
     };
-}
-
-// TODO: figure out away to not have to make users create this function themselves
-#[unsafe(no_mangle)]
-extern "C" fn js_render_component(fn_name: *mut u8, len: usize) -> *const u8 {
-    let fn_name = unsafe { String::from_raw_parts(fn_name, len, len) };
-
-    match render_component(&fn_name) {
-        Some(html) => unsafe {
-            pserve::client::RENDER_RESULT = pserve::client::RenderResult::from(html);
-            &raw const pserve::client::RENDER_RESULT as *const _ as *const u8
-        },
-        None => std::ptr::null(),
-    }
 }
 
 component_handler! {

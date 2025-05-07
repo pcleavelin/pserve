@@ -34,7 +34,9 @@ struct ApiState<T: Send + Sync> {
     connected_clients: RwLock<HashMap<SocketAddr, ConnectedClient>>,
     state_processor:
         RwLock<Option<Box<dyn Fn(&mut T, SocketAddr, String) -> Option<Event> + Send + Sync>>>,
-    processors: RwLock<Vec<Box<dyn Fn(&mut T, serde_json::Value) -> Option<Event> + Send + Sync>>>,
+    processors: RwLock<
+        Vec<Box<dyn Fn(&mut T, SocketAddr, serde_json::Value) -> Option<Event> + Send + Sync>>,
+    >,
     routes: RwLock<HashMap<String, String>>,
     state: RwLock<T>,
 }
@@ -44,7 +46,9 @@ impl<T: Send + Sync> ApiState<T> {
         state_processor: Option<
             Box<dyn Fn(&mut T, SocketAddr, String) -> Option<Event> + Send + Sync>,
         >,
-        processors: Vec<Box<dyn Fn(&mut T, serde_json::Value) -> Option<Event> + Send + Sync>>,
+        processors: Vec<
+            Box<dyn Fn(&mut T, SocketAddr, serde_json::Value) -> Option<Event> + Send + Sync>,
+        >,
         routes: HashMap<String, String>,
         state: T,
     ) -> Self {
@@ -106,7 +110,7 @@ pub struct UserContext {}
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ToServerEvent {
     Test(String),
-    PageLoad { path: String },
+    PageLoad { path: String, params: String },
     RequestFullState { name: String },
     Custom(serde_json::Value),
 }
@@ -127,6 +131,7 @@ pub enum ToClientEvent {
     #[serde(rename_all = "camelCase")]
     RenderComponent {
         component_name: String,
+        params: Option<String>,
         dom_id: Option<String>,
     },
 
@@ -138,8 +143,10 @@ pub enum ToClientEvent {
 #[derive(Default)]
 pub struct App<T: Default> {
     state_processor: Option<Box<dyn Fn(&mut T, SocketAddr, String) -> Option<Event> + Send + Sync>>,
-    processors: Vec<Box<dyn Fn(&mut T, serde_json::Value) -> Option<Event> + Send + Sync>>,
+    processors:
+        Vec<Box<dyn Fn(&mut T, SocketAddr, serde_json::Value) -> Option<Event> + Send + Sync>>,
     routes: HashMap<String, String>,
+    wasm: Option<&'static [u8]>,
     state: T,
 }
 
@@ -154,7 +161,7 @@ impl<T: Default + Send + Sync + 'static> App<T> {
 
     pub fn add_processor<F>(mut self, f: F) -> Self
     where
-        F: Fn(&mut T, serde_json::Value) -> Option<Event> + Send + Sync + 'static,
+        F: Fn(&mut T, SocketAddr, serde_json::Value) -> Option<Event> + Send + Sync + 'static,
     {
         self.processors.push(Box::new(f));
         self
@@ -168,6 +175,11 @@ impl<T: Default + Send + Sync + 'static> App<T> {
 
     pub fn state(mut self, state: T) -> Self {
         self.state = state;
+        self
+    }
+
+    pub fn wasm(mut self, blob: &'static [u8]) -> Self {
+        self.wasm = Some(blob);
         self
     }
 
@@ -195,45 +207,45 @@ impl<T: Default + Send + Sync + 'static> App<T> {
 
                             tracing::debug!("event: {event:?}");
 
-                            if let ToServerEvent::RequestFullState { name } = event {
-                                tracing::info!("{from} is requesting full state {name}");
-                                if let Some(state_processor) =
-                                    state.state_processor.read().await.deref()
-                                {
-                                    let mut state = state.state.write().await;
-                                    if let Some(event) = state_processor(&mut state, from, name) {
-                                        pending_events.push(event);
-                                    }
-                                } else {
-                                    tracing::error!("no state processor registered");
-                                }
-                            } else {
-                                for processor in state.processors.read().await.iter() {
-                                    match &event {
-                                        ToServerEvent::Test(_) => {}
-                                        ToServerEvent::RequestFullState { .. } => {}
-                                        ToServerEvent::PageLoad { path } => {
-                                            if let Some(component_name) =
-                                                state.routes.read().await.get(path)
-                                            {
-                                                pending_events.push(Event::ToSpecificClient {
-                                                    who: from,
-                                                    event: ToClientEvent::RenderComponent {
-                                                        component_name: component_name.clone(),
-                                                        dom_id: Some("test".to_string()),
-                                                    },
-                                                });
-                                            }
+                            match event {
+                                ToServerEvent::Test(_) => {}
+                                ToServerEvent::RequestFullState { name } => {
+                                    tracing::info!("{from} is requesting full state {name}");
+                                    if let Some(state_processor) =
+                                        state.state_processor.read().await.deref()
+                                    {
+                                        let mut state = state.state.write().await;
+                                        if let Some(event) = state_processor(&mut state, from, name)
+                                        {
+                                            pending_events.push(event);
                                         }
-                                        ToServerEvent::Custom(value) => {
-                                            let mut state = state.state.write().await;
+                                    } else {
+                                        tracing::error!("no state processor registered");
+                                    }
+                                }
+                                ToServerEvent::PageLoad { path, params } => {
+                                    if let Some(component_name) =
+                                        state.routes.read().await.get(&path)
+                                    {
+                                        pending_events.push(Event::ToSpecificClient {
+                                            who: from,
+                                            event: ToClientEvent::RenderComponent {
+                                                component_name: component_name.clone(),
+                                                params: Some(params.clone()),
+                                                dom_id: Some("test".to_string()),
+                                            },
+                                        });
+                                    }
+                                }
+                                ToServerEvent::Custom(value) => {
+                                    let mut user_state = state.state.write().await;
 
-                                            // TODO: async?
-                                            if let Some(event) =
-                                                processor(&mut state, value.clone())
-                                            {
-                                                pending_events.push(event);
-                                            }
+                                    for processor in state.processors.read().await.iter() {
+                                        // TODO: async?
+                                        if let Some(event) =
+                                            processor(&mut user_state, from, value.clone())
+                                        {
+                                            pending_events.push(event);
                                         }
                                     }
                                 }
@@ -290,7 +302,12 @@ impl<T: Default + Send + Sync + 'static> App<T> {
 
         let app = Router::new()
             // .route("/", get(index))
-            .route("/client.wasm", get(client_wasm))
+            .route(
+                "/client.wasm",
+                get(move || async move {
+                    Wasm(Bytes::from(self.wasm.expect("wasm blob not provided")))
+                }),
+            )
             .route("/ws", get(ws_handler))
             .merge(component_routes)
             .layer(
@@ -310,16 +327,6 @@ impl<T: Default + Send + Sync + 'static> App<T> {
 
         Ok(())
     }
-}
-
-async fn client_wasm() -> Wasm<Bytes> {
-    Wasm(Bytes::from(
-        // TODO: don't hardcode this
-        include_bytes!(
-            "../examples/hello_server/target/wasm32-unknown-unknown/debug/hello_server.wasm"
-        )
-        .to_vec(),
-    ))
 }
 
 async fn index() -> Html<&'static str> {

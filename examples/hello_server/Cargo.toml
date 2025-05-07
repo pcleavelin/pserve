@@ -2,6 +2,7 @@
 name = "hello_server"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [lib]
 name = "hello_server"
@@ -11,7 +12,6 @@ crate-type = ["cdylib", "rlib"]
 pserve = { path = "../.." }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
-wasm-bindgen = "0.2.100"
 
 [profile.release]
 strip = true

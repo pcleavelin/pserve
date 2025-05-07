@@ -20,7 +20,7 @@
                         const e = document.querySelector(`[data-pserve-id="${msg.domId}"]`);
                         e.innerHTML = msg.html;
                     } else if (msg.type === "renderComponent") {
-                        renderComponentAt(instance, msg.componentName, msg.domId ?? "test");
+                        renderComponentAt(instance, msg.componentName, msg.domId ?? "test", msg.params ?? "");
                     } else if (msg.type === "custom") {
                         (async () => {
                             handle_custom_event(JSON.stringify(msg.event));
@@ -32,6 +32,10 @@
                 };
             };
 
+            const write_u32 = (instance, ptr, num) => {
+                const view = new DataView(instance.exports.memory.buffer);
+                view.setUint32(ptr, num, true);
+            };
             const read_string = (instance, ptr, len) => {
                 const bytes = new Uint8Array(instance.exports.memory.buffer, ptr, len);
                 return new TextDecoder("utf-8").decode(bytes);
@@ -74,6 +78,29 @@
                             e.outerHTML = msg;
                         }
                     },
+                    update_cookie: (ptr, len) => {
+                        const msg = read_string(instance, ptr, len);
+                        document.cookie = msg;
+                    },
+                    get_cookie: (ptr, len, cookie_len_ptr) => {
+                        const msg = read_string(instance, ptr, len);
+                        const cookie = document.cookie
+                        .split(";")
+                        .map((c) => c.trim())
+                        .find((c) => c.startsWith(msg + "="))
+                        ?.split("=")[1];
+
+                        console.log(`[JS]: ${cookie}`);
+
+                        if (!!cookie) {
+                            write_u32(instance, cookie_len_ptr, cookie.length);
+                            const cookie_str = write_string(instance, cookie);
+                            console.log(`[JS]: ${cookie_str.ptr}`);
+                            return cookie_str.ptr;
+                        } else {
+                            return 0;
+                        }
+                    },
                     send_event_to_server: (ptr, len) => {
                         const msg = read_string(instance, ptr, len);
                         (async () => {
@@ -94,7 +121,7 @@
                 const e = document.getElementById("loading-text");
                 e.parentNode.removeChild(e);
 
-                s.send(JSON.stringify({type: "pageLoad", path: window.location.pathname}));
+                s.send(JSON.stringify({type: "pageLoad", path: window.location.pathname, params: window.location.search}));
             })();
 
             function call_wasm_fn_ptr(value, ptr) {
@@ -109,8 +136,10 @@
                 instance.exports.rerender();
             }
 
-            function renderComponentAt(instance, component_name, domId) {
-                const result_ptr = instance.exports.js_render_component(...Object.values(write_string(instance, component_name)));
+            function renderComponentAt(instance, component_name, domId, params) {
+                const component_name_str = write_string(instance, component_name);
+                const params_str = write_string(instance, params);
+                const result_ptr = instance.exports.js_render_component(component_name_str.ptr, component_name_str.len, params_str.ptr, params_str.len);
 
                 if (result_ptr === 0) {
                     console.error("failed to render component");

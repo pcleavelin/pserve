@@ -8,6 +8,7 @@ use core::{
     panic::Location,
     sync::atomic::{AtomicU32, Ordering},
 };
+use serde::{Serialize, de::DeserializeOwned};
 use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -23,6 +24,8 @@ pub mod env {
             pub fn log(msg: *const u8, len: i32);
 
             pub fn update_dom(dom_id: u32, html: *const u8, len: i32);
+            pub fn update_cookie(msg: *const u8, len: i32);
+            pub fn get_cookie(msg: *const u8, len: i32, cookie_len: *mut i32) -> *const u8;
 
             pub fn send_event_to_server(msg: *const u8, len: i32);
         }
@@ -36,6 +39,23 @@ pub mod env {
     }
     pub fn update_dom(dom_id: u32, html: &str) {
         unsafe { env_js::update_dom(dom_id, html.as_ptr(), html.len() as i32) }
+    }
+    pub fn update_cookie(name: &str, value: impl Serialize) {
+        let value = serde_json::to_string(&value).unwrap();
+        let cookie = format!("{}={}", name, value);
+        unsafe { env_js::update_cookie(cookie.as_ptr(), cookie.len() as i32) }
+    }
+    pub fn get_cookie(name: &str) -> Option<String> {
+        let mut len = 0;
+        let cookie = unsafe { env_js::get_cookie(name.as_ptr(), name.len() as i32, &mut len) };
+        if cookie.is_null() {
+            return None;
+        }
+
+        let cookie =
+            unsafe { String::from_raw_parts(cookie as *mut u8, len as usize, len as usize) };
+        log(&format!("got cookie {cookie:?}"));
+        Some(cookie)
     }
     pub fn send_event_to_server<T: Serialize>(msg: &T) -> Result<(), serde_json::Error> {
         let msg = serde_json::to_string(msg)?;
@@ -309,6 +329,10 @@ pub trait Stateful {
     fn apply_update(update: Self::Update, data: &mut Self::EventData);
 }
 
+pub trait CookieEvent {
+    fn cookie_name() -> &'static str;
+}
+
 trait SettableEvent {
     fn as_any(&self) -> &dyn Any;
     fn set(&mut self, value: serde_json::Value);
@@ -326,32 +350,43 @@ pub enum DataType {
 #[derive(Clone, Copy)]
 pub struct StateEvent<T: Stateful + Clone + 'static>
 where
-    <T as Stateful>::EventData: Default + Clone,
+    <T as Stateful>::EventData: DeserializeOwned + Default + Clone,
 {
-    data: Signal<<T as Stateful>::EventData>,
+    data: Signal<StateInner<<T as Stateful>::EventData>>,
+}
+
+#[derive(Clone, Copy)]
+pub struct StateInner<T: Default + Clone> {
+    inner: T,
+    on_update: Option<fn(&T)>,
 }
 
 impl<T: Stateful + Clone> StateEvent<T>
 where
-    <T as Stateful>::EventData: Default + Clone,
+    <T as Stateful>::EventData: DeserializeOwned + Default + Clone,
 {
     pub fn get(&self) -> <T as Stateful>::EventData {
-        self.data.get()
+        self.data.get().inner
     }
 
     pub fn get_with_index(&self, index: u32) -> <T as Stateful>::EventData {
-        self.data.get_with_key(index)
+        self.data.get_with_key(index).inner
     }
 
     pub fn len(&self) -> usize {
         // TODO: use a non-cloning method
-        T::len(&self.data.get())
+        T::len(&self.data.get().inner)
+    }
+
+    pub fn on_update(mut self, f: fn(&<T as Stateful>::EventData)) -> Self {
+        self.data.get_mut().on_update = Some(f);
+        self
     }
 }
 
 impl<T: Stateful + Clone> SettableEvent for StateEvent<T>
 where
-    <T as Stateful>::EventData: Default + Clone,
+    <T as Stateful>::EventData: DeserializeOwned + Default + Clone,
 {
     fn as_any(&self) -> &dyn Any {
         self
@@ -362,40 +397,77 @@ where
             env::log("got full state");
 
             unsafe {
-                for dom_id in (*self.data.inner).registered_dom_nodes.iter().cloned() {
-                    PERSISTENT_VALUES.to_re_render.borrow_mut().insert(dom_id);
-                }
-                for dom_id in (*self.data.inner).registered_dom_nodes_by_key.values() {
-                    PERSISTENT_VALUES.to_re_render.borrow_mut().insert(*dom_id);
+                if let Ok(mut to_re_render) = PERSISTENT_VALUES.to_re_render.try_borrow_mut() {
+                    for dom_id in (*self.data.inner).registered_dom_nodes.iter().cloned() {
+                        to_re_render.insert(dom_id);
+                    }
+                    for dom_id in (*self.data.inner).registered_dom_nodes_by_key.values() {
+                        to_re_render.insert(*dom_id);
+                    }
                 }
             }
 
-            T::replace(full, &mut self.data.get_mut());
-        } else if let Ok(update) = serde_json::from_value::<<T as Stateful>::Update>(value) {
+            T::replace(full, &mut self.data.get_mut().inner);
+
+            if let Some(on_update) = self.data.get().on_update {
+                on_update(&self.data.get().inner);
+            }
+        } else if let Ok(update) = serde_json::from_value::<<T as Stateful>::Update>(value.clone())
+        {
             env::log("got partial state");
 
-            match update.data_type() {
-                DataType::Single => unsafe {
-                    for dom_id in (*self.data.inner).registered_dom_nodes.iter().cloned() {
-                        PERSISTENT_VALUES.to_re_render.borrow_mut().insert(dom_id);
-                    }
-                },
-                DataType::Multiple(keys) => unsafe {
-                    for dom_id in (*self.data.inner).registered_dom_nodes.iter().cloned() {
-                        PERSISTENT_VALUES.to_re_render.borrow_mut().insert(dom_id);
-                    }
-                    for (_, dom_id) in (*self.data.inner)
-                        .registered_dom_nodes_by_key
-                        .iter()
-                        .filter(|(key, _)| keys.contains(key))
-                    {
-                        PERSISTENT_VALUES.to_re_render.borrow_mut().insert(*dom_id);
-                    }
-                },
+            if let Ok(mut to_re_render) = PERSISTENT_VALUES.to_re_render.try_borrow_mut() {
+                match update.data_type() {
+                    DataType::Single => unsafe {
+                        for dom_id in (*self.data.inner).registered_dom_nodes.iter().cloned() {
+                            to_re_render.insert(dom_id);
+                        }
+                    },
+                    DataType::Multiple(keys) => unsafe {
+                        for dom_id in (*self.data.inner).registered_dom_nodes.iter().cloned() {
+                            to_re_render.insert(dom_id);
+                        }
+                        for (_, dom_id) in (*self.data.inner)
+                            .registered_dom_nodes_by_key
+                            .iter()
+                            .filter(|(key, _)| keys.contains(key))
+                        {
+                            to_re_render.insert(*dom_id);
+                        }
+                    },
+                }
             }
 
             let mut data = self.data.get_mut();
-            T::apply_update(update, &mut data);
+            T::apply_update(update, &mut data.inner);
+
+            if let Some(on_update) = data.on_update {
+                on_update(&data.inner);
+            } else {
+                env::log("no on_update");
+            }
+        } else if let Ok(value) = serde_json::from_value::<<T as Stateful>::EventData>(value) {
+            env::log("got exact state");
+
+            unsafe {
+                if let Ok(mut to_re_render) = PERSISTENT_VALUES.to_re_render.try_borrow_mut() {
+                    for dom_id in (*self.data.inner).registered_dom_nodes.iter().cloned() {
+                        to_re_render.insert(dom_id);
+                    }
+                    for dom_id in (*self.data.inner).registered_dom_nodes_by_key.values() {
+                        to_re_render.insert(*dom_id);
+                    }
+                }
+            }
+
+            let mut data = self.data.get_mut();
+            data.inner = value;
+
+            if let Some(on_update) = data.on_update {
+                on_update(&data.inner);
+            } else {
+                env::log("no on_update");
+            }
         }
     }
 }
@@ -403,7 +475,7 @@ where
 #[track_caller]
 pub fn use_state_event<T: Stateful + Clone + 'static>(event: T) -> StateEvent<T>
 where
-    <T as Stateful>::EventData: Default + Clone,
+    <T as Stateful>::EventData: DeserializeOwned + Default + Clone,
 {
     let mut event_subscriptions = PERSISTENT_VALUES.event_subscriptions.borrow_mut();
 
@@ -415,7 +487,10 @@ where
 
         return state_event.clone();
     } else {
-        let data = SignalData::new(<T as Stateful>::EventData::default());
+        let data = SignalData::new(StateInner {
+            inner: <T as Stateful>::EventData::default(),
+            on_update: None,
+        });
         let state_event = StateEvent {
             data: Signal {
                 inner: Box::into_raw(Box::new(data)),
@@ -434,6 +509,25 @@ where
 
         state_event
     }
+}
+
+// TODO: don't allow further `on_update` calls after this one (or allow chaining them?)
+pub fn use_cookie<T: Stateful + CookieEvent + Clone + 'static>(event: T) -> StateEvent<T>
+where
+    <T as Stateful>::EventData: Serialize + DeserializeOwned + Default + Clone,
+{
+    // NOTE: this will send the `RequestFullState` event to the server
+    let mut state_event = use_state_event(event).on_update(|value| {
+        // TODO: tell the server what cookie we have
+        env::update_cookie(T::cookie_name(), value);
+    });
+
+    if let Some(cookie) = env::get_cookie(T::cookie_name()) {
+        let value = serde_json::from_str(&cookie).unwrap();
+        state_event.set(value);
+    }
+
+    state_event
 }
 
 // NOTE: This is WASM so its probably fine lol
