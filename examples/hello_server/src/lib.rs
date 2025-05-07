@@ -5,7 +5,7 @@ pub mod client;
 use pserve::server::{Event, ToClientEvent};
 
 #[cfg(target_arch = "wasm32")]
-use pserve::client::{Blah, BlahUpdate, DataType};
+use pserve::client::{DataType, StateDataType, Stateful};
 
 use serde::{Deserialize, Serialize};
 use std::hash::Hash;
@@ -79,7 +79,7 @@ pub enum StateUpdate {
 }
 
 #[cfg(target_arch = "wasm32")]
-impl BlahUpdate for StateUpdate {
+impl StateDataType for StateUpdate {
     fn data_type(&self) -> DataType {
         match self {
             StateUpdate::CheckBox { check_boxes } => {
@@ -96,7 +96,7 @@ impl BlahUpdate for StateUpdate {
 pub struct CheckBoxStateEvent;
 
 #[cfg(target_arch = "wasm32")]
-impl pserve::client::Blah for CheckBoxStateEvent {
+impl pserve::client::Stateful for CheckBoxStateEvent {
     type Full = FullState;
     type Update = StateUpdate;
     type EventData = Vec<bool>;
@@ -108,7 +108,7 @@ impl pserve::client::Blah for CheckBoxStateEvent {
         data.len()
     }
 
-    fn replace(&self, full: Self::Full, data: &mut Vec<bool>) {
+    fn replace(full: Self::Full, data: &mut Vec<bool>) {
         pserve::client::env::log("replacing all check boxes");
         if let FullState::CheckBox { mut check_boxes } = full {
             data.clear();
@@ -116,7 +116,7 @@ impl pserve::client::Blah for CheckBoxStateEvent {
         }
     }
 
-    fn apply_update(&self, update: Self::Update, data: &mut Vec<bool>) {
+    fn apply_update(update: Self::Update, data: &mut Vec<bool>) {
         if let StateUpdate::CheckBox { check_boxes } = update {
             for (id, value) in check_boxes {
                 match data.get_mut(id as usize) {
@@ -135,7 +135,7 @@ impl pserve::client::Blah for CheckBoxStateEvent {
 pub struct MemeListStateEvent;
 
 #[cfg(target_arch = "wasm32")]
-impl pserve::client::Blah for MemeListStateEvent {
+impl pserve::client::Stateful for MemeListStateEvent {
     type Full = FullState;
     type Update = StateUpdate;
     type EventData = Vec<String>;
@@ -147,7 +147,7 @@ impl pserve::client::Blah for MemeListStateEvent {
         data.len()
     }
 
-    fn replace(&self, full: Self::Full, data: &mut Self::EventData) {
+    fn replace(full: Self::Full, data: &mut Self::EventData) {
         pserve::client::env::log("replacing all memes");
         if let FullState::MemeList { mut memes } = full {
             data.clear();
@@ -155,7 +155,7 @@ impl pserve::client::Blah for MemeListStateEvent {
         }
     }
 
-    fn apply_update(&self, update: Self::Update, data: &mut Self::EventData) {
+    fn apply_update(update: Self::Update, data: &mut Self::EventData) {
         if let StateUpdate::MemeList { memes } = update {
             for (id, value) in memes {
                 match data.get_mut(id as usize) {

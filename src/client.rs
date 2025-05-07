@@ -156,16 +156,13 @@ extern "C" fn rerender() {
         }
 
         let html = render(dom_id);
-        // env::log(&html);
         env::update_dom(dom_id, &html);
     }
 }
 
 pub struct PersistentState {
     cell: LazyCell<RefCell<HashMap<Location<'static>, Box<dyn Any>>>>,
-    event_subscriptions: LazyCell<RefCell<HashMap<TypeId, Box<dyn BlahEvent + 'static>>>>,
-    // event_subscriptions: LazyCell<RefCell<Option<Box<dyn Any>>>>,
-    // event_subscriptions_update_func: LazyCell<RefCell<Option<Box<dyn Fn(serde_json::Value)>>>>,
+    event_subscriptions: LazyCell<RefCell<HashMap<TypeId, Box<dyn SettableEvent + 'static>>>>,
     builders: LazyCell<RefCell<HashMap<u32, DomNodeUnbuilt>>>,
     built_nodes: LazyCell<RefCell<HashMap<u32, DomNodeBuilt>>>,
     to_re_render: LazyCell<RefCell<HashSet<u32>>>,
@@ -300,25 +297,24 @@ fn use_signal_with_caller<T: Clone + 'static>(
     signal
 }
 
-pub trait Blah {
+pub trait Stateful {
     type Full: serde::de::DeserializeOwned;
-    type Update: BlahUpdate + serde::de::DeserializeOwned;
+    type Update: StateDataType + serde::de::DeserializeOwned;
     type EventData;
 
     fn name() -> String;
     fn len(data: &Self::EventData) -> usize;
 
-    fn replace(&self, full: Self::Full, data: &mut Self::EventData);
-    fn apply_update(&self, update: Self::Update, data: &mut Self::EventData);
+    fn replace(full: Self::Full, data: &mut Self::EventData);
+    fn apply_update(update: Self::Update, data: &mut Self::EventData);
 }
 
-trait BlahEvent: Any {
+trait SettableEvent {
     fn as_any(&self) -> &dyn Any;
-
     fn set(&mut self, value: serde_json::Value);
 }
 
-pub trait BlahUpdate {
+pub trait StateDataType {
     fn data_type(&self) -> DataType;
 }
 
@@ -328,44 +324,41 @@ pub enum DataType {
 }
 
 #[derive(Clone, Copy)]
-pub struct StateEvent<T: Blah + Clone + 'static>
+pub struct StateEvent<T: Stateful + Clone + 'static>
 where
-    <T as Blah>::EventData: Default + Clone,
+    <T as Stateful>::EventData: Default + Clone,
 {
-    event: T,
-    data: Signal<<T as Blah>::EventData>, // signal: Signal<Option<<T as Blah>::EventData>>,
+    data: Signal<<T as Stateful>::EventData>,
 }
 
-impl<T: Blah + Clone> StateEvent<T>
+impl<T: Stateful + Clone> StateEvent<T>
 where
-    <T as Blah>::EventData: Default + Clone,
+    <T as Stateful>::EventData: Default + Clone,
 {
-    pub fn get(&self) -> <T as Blah>::EventData {
+    pub fn get(&self) -> <T as Stateful>::EventData {
         self.data.get()
     }
 
-    pub fn get_with_index(&self, index: u32) -> <T as Blah>::EventData {
+    pub fn get_with_index(&self, index: u32) -> <T as Stateful>::EventData {
         self.data.get_with_key(index)
     }
 
     pub fn len(&self) -> usize {
-        let _ = self.data.get();
-
-        unsafe { T::len(&(*self.data.inner).value) }
-        // self.data.get_mut().len()
+        // TODO: use a non-cloning method
+        T::len(&self.data.get())
     }
 }
 
-impl<T: Blah + Clone> BlahEvent for StateEvent<T>
+impl<T: Stateful + Clone> SettableEvent for StateEvent<T>
 where
-    <T as Blah>::EventData: Default + Clone,
+    <T as Stateful>::EventData: Default + Clone,
 {
     fn as_any(&self) -> &dyn Any {
         self
     }
 
     fn set(&mut self, value: serde_json::Value) {
-        if let Ok(full) = serde_json::from_value::<<T as Blah>::Full>(value.clone()) {
+        if let Ok(full) = serde_json::from_value::<<T as Stateful>::Full>(value.clone()) {
             env::log("got full state");
 
             unsafe {
@@ -377,8 +370,8 @@ where
                 }
             }
 
-            self.event.replace(full, &mut self.data.get_mut());
-        } else if let Ok(update) = serde_json::from_value::<<T as Blah>::Update>(value) {
+            T::replace(full, &mut self.data.get_mut());
+        } else if let Ok(update) = serde_json::from_value::<<T as Stateful>::Update>(value) {
             env::log("got partial state");
 
             match update.data_type() {
@@ -402,60 +395,17 @@ where
             }
 
             let mut data = self.data.get_mut();
-            self.event.apply_update(update, &mut data);
+            T::apply_update(update, &mut data);
         }
     }
 }
 
 #[track_caller]
-pub fn use_state_event<
-    T: Blah + Clone + 'static,
-    // T: for<'a> From<&'a str> + Clone + Copy + Eq + Hash + 'static,
-    // D: serde::de::DeserializeOwned + Clone + 'static,
->(
-    event: T,
-) -> StateEvent<T>
+pub fn use_state_event<T: Stateful + Clone + 'static>(event: T) -> StateEvent<T>
 where
-    <T as Blah>::EventData: Default + Clone,
+    <T as Stateful>::EventData: Default + Clone,
 {
-    let location = Location::caller();
-    // let signal = use_signal_with_caller(|| None::<D>, *location);
-    // let event_subscriptions =
-    //     persist_value_here(|| Rc::new(RefCell::new(HashMap::<T, StateEvent<_, _>>::new())));
-
-    // if PERSISTENT_VALUES.event_subscriptions.borrow().is_none() {
-    //     PERSISTENT_VALUES
-    //         .event_subscriptions
-    //         .borrow_mut()
-    //         // .replace(HashMap::<TypeId, StateEvent<T, D>>::new());
-    //         .replace(HashMap::<TypeId, Box<dyn BlahEvent>>::new());
-    //
-    //     // PERSISTENT_VALUES.event_subscriptions_update_func.borrow_mut().replace(
-    //     //     Box::new(|value| {
-    //     //         if let Some(state_type) = value.get("type") {
-    //     //             let state_type = T::from(&state_type.as_str().unwrap());
-    //     //             if let Some(event_subscriptions) = PERSISTENT_VALUES.event_subscriptions.borrow_mut().as_mut() {
-    //     //                 let event_subscriptions = event_subscriptions
-    //     //                     .downcast_mut::<HashMap<T, StateEvent<T, D>>>()
-    //     //                     .expect("`use_state_event` must always be called with the same type parameters");
-    //     //                 if let Some(mut state_event) = event_subscriptions.get(&state_type).cloned() {
-    //     //                     match serde_json::from_value(value.clone()) {
-    //     //                         Ok(state) => state_event.set(state),
-    //     //                         Err(e) => {
-    //     //                             env::log(&format!("failed to deserialize state event: {e}: {value}"));
-    //     //                         }
-    //     //                     }
-    //     //                 }
-    //     //             }
-    //     //         }
-    //     //     }),
-    //     // );
-    // }
-
     let mut event_subscriptions = PERSISTENT_VALUES.event_subscriptions.borrow_mut();
-    // let event_subscriptions = event_subscriptions
-    //     .downcast_mut::<HashMap<TypeId, Box<dyn BlahEvent>>>()
-    //     .expect("`use_state_event` must always be called with the same type parameters");
 
     if let Some(state_event) = event_subscriptions.get(&TypeId::of::<T>()) {
         let state_event = (*state_event)
@@ -465,9 +415,8 @@ where
 
         return state_event.clone();
     } else {
-        let data = SignalData::new(<T as Blah>::EventData::default());
+        let data = SignalData::new(<T as Stateful>::EventData::default());
         let state_event = StateEvent {
-            event,
             data: Signal {
                 inner: Box::into_raw(Box::new(data)),
             },
@@ -497,7 +446,6 @@ pub static CURRENT_SCOPE_DOM_ID: AtomicU32 = AtomicU32::new(0);
 pub static PERSISTENT_VALUES: PersistentState = PersistentState {
     cell: LazyCell::new(|| RefCell::new(HashMap::new())),
     event_subscriptions: LazyCell::new(|| RefCell::new(HashMap::new())),
-    // event_subscriptions_update_func: LazyCell::new(|| RefCell::new(None)),
     builders: LazyCell::new(|| RefCell::new(HashMap::new())),
     built_nodes: LazyCell::new(|| RefCell::new(HashMap::new())),
     to_re_render: LazyCell::new(|| RefCell::new(HashSet::new())),
