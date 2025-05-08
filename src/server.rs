@@ -29,26 +29,29 @@ pub use tokio;
 pub use tracing;
 pub use tracing_subscriber;
 
+// pub type StateProcessorFnDyn<T> = dyn Fn(&mut T, SocketAddr, String) -> Option<Event> + Send + Sync;
+// pub type ProcessorFnDyn<T> =
+//     dyn Fn(&mut T, SocketAddr, serde_json::Value) -> Option<Event> + Send + Sync;
+
+pub type StateProcessorFn<T> = fn(&mut T, SocketAddr, String) -> Option<Event>;
+pub type CookieProcessorFn<T> = fn(&mut T, SocketAddr, String, String) -> Option<Event>;
+pub type ProcessorFn<T> = fn(&mut T, SocketAddr, serde_json::Value) -> Option<Event>;
+
 struct ApiState<T: Send + Sync> {
     events_to_be_sent: RwLock<VecDeque<Event>>,
     connected_clients: RwLock<HashMap<SocketAddr, ConnectedClient>>,
-    state_processor:
-        RwLock<Option<Box<dyn Fn(&mut T, SocketAddr, String) -> Option<Event> + Send + Sync>>>,
-    processors: RwLock<
-        Vec<Box<dyn Fn(&mut T, SocketAddr, serde_json::Value) -> Option<Event> + Send + Sync>>,
-    >,
+    state_processor: RwLock<Option<Box<StateProcessorFn<T>>>>,
+    cookie_processor: RwLock<Option<Box<CookieProcessorFn<T>>>>,
+    processors: RwLock<Vec<ProcessorFn<T>>>,
     routes: RwLock<HashMap<String, String>>,
     state: RwLock<T>,
 }
 
 impl<T: Send + Sync> ApiState<T> {
     fn new(
-        state_processor: Option<
-            Box<dyn Fn(&mut T, SocketAddr, String) -> Option<Event> + Send + Sync>,
-        >,
-        processors: Vec<
-            Box<dyn Fn(&mut T, SocketAddr, serde_json::Value) -> Option<Event> + Send + Sync>,
-        >,
+        state_processor: Option<Box<StateProcessorFn<T>>>,
+        cookie_processor: Option<Box<CookieProcessorFn<T>>>,
+        processors: Vec<ProcessorFn<T>>,
         routes: HashMap<String, String>,
         state: T,
     ) -> Self {
@@ -56,6 +59,7 @@ impl<T: Send + Sync> ApiState<T> {
             events_to_be_sent: RwLock::new(VecDeque::new()),
             connected_clients: RwLock::new(HashMap::new()),
             state_processor: RwLock::new(state_processor),
+            cookie_processor: RwLock::new(cookie_processor),
             processors: RwLock::new(processors),
             routes: RwLock::new(routes),
             state: RwLock::new(state),
@@ -112,6 +116,7 @@ pub enum ToServerEvent {
     Test(String),
     PageLoad { path: String, params: String },
     RequestFullState { name: String },
+    Cookie { name: String, value: String },
     Custom(serde_json::Value),
 }
 
@@ -142,28 +147,27 @@ pub enum ToClientEvent {
 
 #[derive(Default)]
 pub struct App<T: Default> {
-    state_processor: Option<Box<dyn Fn(&mut T, SocketAddr, String) -> Option<Event> + Send + Sync>>,
-    processors:
-        Vec<Box<dyn Fn(&mut T, SocketAddr, serde_json::Value) -> Option<Event> + Send + Sync>>,
+    state_processor: Option<Box<StateProcessorFn<T>>>,
+    cookie_processor: Option<Box<CookieProcessorFn<T>>>,
+    processors: Vec<ProcessorFn<T>>,
     routes: HashMap<String, String>,
     wasm: Option<&'static [u8]>,
     state: T,
 }
 
 impl<T: Default + Send + Sync + 'static> App<T> {
-    pub fn state_processor<F>(mut self, f: F) -> Self
-    where
-        F: Fn(&mut T, SocketAddr, String) -> Option<Event> + Send + Sync + 'static,
-    {
+    pub fn state_processor(mut self, f: StateProcessorFn<T>) -> Self {
         self.state_processor = Some(Box::new(f));
         self
     }
 
-    pub fn add_processor<F>(mut self, f: F) -> Self
-    where
-        F: Fn(&mut T, SocketAddr, serde_json::Value) -> Option<Event> + Send + Sync + 'static,
-    {
-        self.processors.push(Box::new(f));
+    pub fn cookie_processor(mut self, f: CookieProcessorFn<T>) -> Self {
+        self.cookie_processor = Some(Box::new(f));
+        self
+    }
+
+    pub fn add_processor(mut self, f: ProcessorFn<T>) -> Self {
+        self.processors.push(f);
         self
     }
 
@@ -186,6 +190,7 @@ impl<T: Default + Send + Sync + 'static> App<T> {
     pub async fn serve(self) -> Result<(), Box<dyn std::error::Error>> {
         let state = Arc::new(ApiState::new(
             self.state_processor,
+            self.cookie_processor,
             self.processors,
             self.routes.clone(),
             self.state,
@@ -221,6 +226,20 @@ impl<T: Default + Send + Sync + 'static> App<T> {
                                         }
                                     } else {
                                         tracing::error!("no state processor registered");
+                                    }
+                                }
+                                ToServerEvent::Cookie { name, value } => {
+                                    if let Some(cookie_processor) =
+                                        state.cookie_processor.read().await.deref()
+                                    {
+                                        let mut state = state.state.write().await;
+                                        if let Some(event) =
+                                            cookie_processor(&mut state, from, name, value)
+                                        {
+                                            pending_events.push(event);
+                                        }
+                                    } else {
+                                        tracing::error!("no cookie processor registered");
                                     }
                                 }
                                 ToServerEvent::PageLoad { path, params } => {

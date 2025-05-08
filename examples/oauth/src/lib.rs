@@ -21,13 +21,13 @@ pub struct State {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ClientEvent {
-    DiscordLogin{ code: String },
+    DiscordLogin { code: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum StateUpdate {
-    UserInfo { user: DiscordUser },
+    UserInfo { user: Option<DiscordUser> },
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -40,7 +40,7 @@ impl StateDataType for StateUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum FullState {
-    UserInfo { user_info: DiscordUser },
+    UserInfo { user: Option<DiscordUser> },
 }
 
 #[derive(Clone, Copy)]
@@ -57,7 +57,7 @@ impl pserve::client::CookieEvent for UserInfoStateEvent {
 impl pserve::client::Stateful for UserInfoStateEvent {
     type Full = FullState;
     type Update = StateUpdate;
-    type EventData = DiscordUser;
+    type EventData = Option<DiscordUser>;
 
     fn name() -> String {
         "user_info".to_string()
@@ -66,14 +66,14 @@ impl pserve::client::Stateful for UserInfoStateEvent {
         1
     }
 
-    fn replace(full: Self::Full, data: &mut DiscordUser) {
-        pserve::client::env::log("replacing user info");
-        if let FullState::UserInfo { mut user_info } = full {
-            *data = user_info;
+    fn replace(full: Self::Full, data: &mut Self::EventData) {
+        pserve::client::env::log(&format!("replacing user info from {data:?} to {full:?}"));
+        if let FullState::UserInfo { mut user } = full {
+            *data = user;
         }
     }
 
-    fn apply_update(update: Self::Update, data: &mut DiscordUser) {
+    fn apply_update(update: Self::Update, data: &mut Self::EventData) {
         if let StateUpdate::UserInfo { user } = update {
             *data = user;
         }
@@ -95,9 +95,44 @@ pub struct DiscordUser {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn discord_login(state: &mut State, who: SocketAddr, value: serde_json::Value) -> Option<Event> {
+pub fn cookie_processor(
+    state: &mut State,
+    who: SocketAddr,
+    name: String,
+    value: String,
+) -> Option<Event> {
+    if name == "userInfo" {
+        let user: Option<DiscordUser> = serde_json::from_str(&value).unwrap();
+
+        if let Some(user) = user {
+            pserve::server::tracing::info!("got cookie {name}: {value:?}, now logging them out");
+
+            // NOTE: this is where you would check your DB if the cookie is valid
+            state.connection_auth.insert(who, user.clone());
+
+            // Some(Event::ToSpecificClient {
+            //     who,
+            //     event: ToClientEvent::Custom {
+            //         event: serde_json::to_value(StateUpdate::UserInfo { user: None }).unwrap(),
+            //     },
+            // })
+            None
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn discord_login(
+    state: &mut State,
+    who: SocketAddr,
+    value: serde_json::Value,
+) -> Option<Event> {
     let event: ClientEvent = serde_json::from_value(value).unwrap();
-    let ClientEvent::DiscordLogin{ code } = event;
+    let ClientEvent::DiscordLogin { code } = event;
 
     let mut data = HashMap::new();
 
@@ -108,21 +143,33 @@ pub fn discord_login(state: &mut State, who: SocketAddr, value: serde_json::Valu
     data.insert("code", &code);
     data.insert("redirect_uri", &redirect_uri);
 
-    let user: Result<_, reqwest::Error> = tokio::task::block_in_place(move || { 
+    let user: Result<_, Box<dyn std::error::Error>> = tokio::task::block_in_place(move || {
         tokio::runtime::Handle::current().block_on(async move {
             let client = reqwest::Client::new();
 
-            let auth: Discord = client
+            let text = client
                 .post("https://discord.com/api/oauth2/token")
                 .form(&data)
-                .send().await?
-                .json().await?;
+                .send()
+                .await?
+                .text()
+                .await?;
 
-            let user: DiscordUser = client
+            let auth: Discord = serde_json::from_str(&text).inspect_err(|err| {
+                pserve::server::tracing::error!(?text, "error logging in: {err:?}");
+            })?;
+
+            let text = client
                 .get("https://discord.com/api/v10/users/@me")
                 .bearer_auth(&auth.access_token)
-                .send().await?
-                .json().await?;
+                .send()
+                .await?
+                .text()
+                .await?;
+
+            let user: DiscordUser = serde_json::from_str(&text).inspect_err(|err| {
+                pserve::server::tracing::error!(?text, "error getting user: {err:?}");
+            })?;
 
             Ok(user)
         })
@@ -138,9 +185,8 @@ pub fn discord_login(state: &mut State, who: SocketAddr, value: serde_json::Valu
             Some(Event::ToSpecificClient {
                 who,
                 event: ToClientEvent::Custom {
-                    event: serde_json::to_value(StateUpdate::UserInfo {
-                        user
-                    }).unwrap(),
+                    event: serde_json::to_value(StateUpdate::UserInfo { user: Some(user) })
+                        .unwrap(),
                 },
             })
         }

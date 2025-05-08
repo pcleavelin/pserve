@@ -17,9 +17,7 @@ async fn main() {
         .wasm(include_bytes!(
             "../target/wasm32-unknown-unknown/debug/oauth.wasm"
         ))
-        // .state_processor(hello_server::request_full_state)
-        // .add_processor(render_component_for_everyone)
-        // .add_processor(toggle_check_box)
+        .cookie_processor(oauth::cookie_processor)
         .add_processor(oauth::discord_login)
         .route("/", "home_page")
         .route("/auth", "auth")

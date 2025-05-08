@@ -1,5 +1,5 @@
 use dotenvy_macro::dotenv;
-use pserve::client::{CookieEvent, StateEvent, Stateful, use_cookie, use_state_event};
+use pserve::client::{CookieEvent, StateEvent, Stateful, use_cookie, use_signal, use_state_event};
 use pserve::dom::DomNodeBuilder;
 use serde::Serialize;
 
@@ -59,9 +59,9 @@ fn home_page(params: Option<String>) -> DomNodeBuilder {
     let user = use_cookie(UserInfoStateEvent);
 
     DomNodeBuilder::default().push("div", move || {
-        let user = user.get();
-
-        if user.username.is_empty() {
+        if let Some(user) = user.get() {
+            DomNodeBuilder::default().push("p", move || format!("Hello {}!", user.username).into())
+        } else {
             let authorize_uri = format!(
                 "https://discord.com/api/oauth2/authorize?client_id={}&redirect_uri={}/auth&response_type=code&scope=guilds.members.read+guilds+identify",
                 dotenv!("DISCORD_CLIENT_ID"),
@@ -71,20 +71,21 @@ fn home_page(params: Option<String>) -> DomNodeBuilder {
             DomNodeBuilder::default()
                 .push("a", || "Login".into())
                 .attr("href", &authorize_uri)
-        } else {
-            DomNodeBuilder::default().push("p", move || format!("Hello {}!", user.username).into())
         }
     })
 }
 
 fn auth(params: Option<String>) -> DomNodeBuilder {
     let user = use_cookie(UserInfoStateEvent);
+    let params = use_signal(|| params.map(|p| p[1..].split('=').nth(1).unwrap().to_string()));
 
-    if let Some(code) = params {
-        let code = code[1..].split('=').nth(1).unwrap().to_string();
+    DomNodeBuilder::default().push("div", move || {
+        if let Some(user) = user.get() {
+            home_page(None)
+        } else {
+            if let Some(code) = params.get() {
+                params.set(None);
 
-        DomNodeBuilder::default().push("div", move || {
-            if user.get().username.is_empty() {
                 pserve::client::env::send_event_to_server(&ClientEvent::DiscordLogin {
                     code: code.to_string(),
                 })
@@ -92,12 +93,10 @@ fn auth(params: Option<String>) -> DomNodeBuilder {
 
                 DomNodeBuilder::default().push("p", || "Logging in...".into())
             } else {
-                home_page(None)
+                DomNodeBuilder::default().push("div", move || {
+                    DomNodeBuilder::default().push("p", || "No code provided".into())
+                })
             }
-        })
-    } else {
-        DomNodeBuilder::default().push("div", move || {
-            DomNodeBuilder::default().push("p", || "No code provided".into())
-        })
-    }
+        }
+    })
 }

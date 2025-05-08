@@ -40,6 +40,7 @@ pub mod env {
     pub fn update_dom(dom_id: u32, html: &str) {
         unsafe { env_js::update_dom(dom_id, html.as_ptr(), html.len() as i32) }
     }
+    // FIXME: set global cookie for the whole domain (instead of just the current path)
     pub fn update_cookie(name: &str, value: impl Serialize) {
         let value = serde_json::to_string(&value).unwrap();
         let cookie = format!("{}={}", name, value);
@@ -514,12 +515,29 @@ where
 // TODO: don't allow further `on_update` calls after this one (or allow chaining them?)
 pub fn use_cookie<T: Stateful + CookieEvent + Clone + 'static>(event: T) -> StateEvent<T>
 where
-    <T as Stateful>::EventData: Serialize + DeserializeOwned + Default + Clone,
+    <T as Stateful>::EventData: Serialize + DeserializeOwned + std::fmt::Debug + Default + Clone,
 {
     // NOTE: this will send the `RequestFullState` event to the server
     let mut state_event = use_state_event(event).on_update(|value| {
+        env::log(&format!(
+            "updating cookie {} to {value:?}",
+            T::cookie_name()
+        ));
+
         // TODO: tell the server what cookie we have
         env::update_cookie(T::cookie_name(), value);
+
+        // TODO: don't hide to server event behind non-wasm arch flag
+        #[derive(serde::Serialize)]
+        #[serde(tag = "type", rename_all = "camelCase")]
+        enum Event {
+            Cookie { name: String, value: String },
+        }
+        env::send_event_to_server(&Event::Cookie {
+            name: T::cookie_name().to_string(),
+            value: serde_json::to_string(&value).unwrap(),
+        })
+        .unwrap();
     });
 
     if let Some(cookie) = env::get_cookie(T::cookie_name()) {

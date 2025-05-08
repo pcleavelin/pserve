@@ -111,7 +111,7 @@
             };
 
             (async () => {
-                const response = await fetch("./client.wasm");
+                const response = await fetch("/client.wasm");
                 const result = 
                     await WebAssembly.instantiateStreaming(response, importObj);
                 instance = result.instance;
