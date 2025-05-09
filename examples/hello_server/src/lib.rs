@@ -184,6 +184,7 @@ pub fn request_full_state(state: &mut State, who: SocketAddr, name: String) -> O
 // TODO: #[processor]
 pub fn render_component_for_everyone(
     _: &mut State,
+    _who: SocketAddr,
     value: serde_json::Value, /* event: ClientEvent */
 ) -> Option<Event> {
     pserve::server::tracing::info!("{:?}", value);
@@ -196,11 +197,16 @@ pub fn render_component_for_everyone(
     Some(Event::ToAllClients(ToClientEvent::RenderComponent {
         component_name: component_name.clone(),
         dom_id: None,
+        params: None,
     }))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn toggle_check_box(state: &mut State, value: serde_json::Value) -> Option<Event> {
+pub fn toggle_check_box(
+    state: &mut State,
+    _who: SocketAddr,
+    value: serde_json::Value,
+) -> Option<Event> {
     pserve::server::tracing::info!("toggle_check_box: {:?}", value);
     let event: ClientEvent = serde_json::from_value(value).unwrap();
 
@@ -219,7 +225,7 @@ pub fn toggle_check_box(state: &mut State, value: serde_json::Value) -> Option<E
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn add_meme(state: &mut State, value: serde_json::Value) -> Option<Event> {
+pub fn add_meme(state: &mut State, _who: SocketAddr, value: serde_json::Value) -> Option<Event> {
     pserve::server::tracing::info!("add_meme: {:?}", value);
     let event: ClientEvent = serde_json::from_value(value).unwrap();
 
