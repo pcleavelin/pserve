@@ -1,6 +1,7 @@
 use dotenvy_macro::dotenv;
-use pserve::client::{CookieEvent, StateEvent, Stateful, use_cookie, use_signal, use_state_event};
+use pserve::client::{CookieEvent, use_cookie, use_signal, use_state_event};
 use pserve::dom::DomNodeBuilder;
+use pserve::state::{StateEvent, Stateful};
 use serde::Serialize;
 
 use crate::{ClientEvent, UserInfoStateEvent};

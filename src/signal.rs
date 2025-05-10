@@ -1,21 +1,21 @@
 #[cfg(target_arch = "wasm32")]
 use crate::client::{PERSISTENT_VALUES, current_dom_id};
 
-use std::collections::HashMap;
+use std::{collections::HashMap, hash::Hash};
 
 #[derive(Clone)]
-pub struct Signal<T: Clone> {
+pub struct Signal<T: Clone, K: Clone + Hash + Eq> {
     // TODO: uh, don't use a raw pointer (maybe just a Cell would be fine?)
-    pub(crate) inner: *mut SignalData<T>,
+    pub(crate) inner: *mut SignalData<T, K>,
 }
 
-pub struct SignalData<T: Clone> {
+pub struct SignalData<T: Clone, K: Clone + Hash + Eq> {
     value: T,
-    registered_dom_nodes: Vec<u32>,
-    registered_dom_nodes_by_key: HashMap<u32, u32>,
+    pub(crate) registered_dom_nodes: Vec<u32>,
+    pub(crate) registered_dom_nodes_by_key: HashMap<K, u32>,
 }
 
-impl<T: Clone> SignalData<T> {
+impl<T: Clone, K: Clone + Hash + Eq> SignalData<T, K> {
     pub fn new(value: T) -> Self {
         Self {
             value,
@@ -26,9 +26,9 @@ impl<T: Clone> SignalData<T> {
 }
 
 // NOTE: HAHAHAHA
-impl<T: Clone> Copy for Signal<T> {}
+impl<T: Clone, K: Clone + Hash + Eq> Copy for Signal<T, K> {}
 
-impl<T: Clone> Signal<T> {
+impl<T: Clone, K: Clone + Hash + Eq> Signal<T, K> {
     #[cfg(target_arch = "wasm32")]
     pub fn reset(&mut self) {
         // FIXME: yolo
@@ -62,7 +62,7 @@ impl<T: Clone> Signal<T> {
         unsafe { (*self.inner).value.clone() }
     }
 
-    pub fn get_with_key(&self, index: u32) -> T {
+    pub fn get_with_key(&self, index: K) -> T {
         #[cfg(target_arch = "wasm32")]
         {
             let dom_id = current_dom_id();

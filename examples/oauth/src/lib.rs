@@ -1,13 +1,15 @@
 #[cfg(target_arch = "wasm32")]
 pub mod client;
 
+#[cfg(target_arch = "wasm32")]
+use pserve::client::CookieEvent;
+
 #[cfg(not(target_arch = "wasm32"))]
 use pserve::server::{Event, ToClientEvent, tokio};
 #[cfg(not(target_arch = "wasm32"))]
 use std::net::SocketAddr;
 
-#[cfg(target_arch = "wasm32")]
-use pserve::client::{DataType, StateDataType, Stateful};
+use pserve::state::{IsSingleValue, Stateful, Valuable};
 
 use dotenvy_macro::dotenv;
 use serde::{Deserialize, Serialize};
@@ -24,59 +26,22 @@ pub enum ClientEvent {
     DiscordLogin { code: String },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum StateUpdate {
-    UserInfo { user: Option<DiscordUser> },
-}
-
-#[cfg(target_arch = "wasm32")]
-impl StateDataType for StateUpdate {
-    fn data_type(&self) -> DataType {
-        DataType::Single
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum FullState {
-    UserInfo { user: Option<DiscordUser> },
-}
-
 #[derive(Clone, Copy)]
 pub struct UserInfoStateEvent;
+impl Valuable<IsSingleValue> for UserInfoStateEvent {}
+impl Stateful for UserInfoStateEvent {
+    type Data = Option<DiscordUser>;
+    type Key = ();
 
-#[cfg(target_arch = "wasm32")]
-impl pserve::client::CookieEvent for UserInfoStateEvent {
-    fn cookie_name() -> &'static str {
-        "userInfo"
+    fn name() -> &'static str {
+        "user_info"
     }
 }
 
 #[cfg(target_arch = "wasm32")]
-impl pserve::client::Stateful for UserInfoStateEvent {
-    type Full = FullState;
-    type Update = StateUpdate;
-    type EventData = Option<DiscordUser>;
-
-    fn name() -> String {
-        "user_info".to_string()
-    }
-    fn len(data: &Self::EventData) -> usize {
-        1
-    }
-
-    fn replace(full: Self::Full, data: &mut Self::EventData) {
-        pserve::client::env::log(&format!("replacing user info from {data:?} to {full:?}"));
-        if let FullState::UserInfo { mut user } = full {
-            *data = user;
-        }
-    }
-
-    fn apply_update(update: Self::Update, data: &mut Self::EventData) {
-        if let StateUpdate::UserInfo { user } = update {
-            *data = user;
-        }
+impl CookieEvent for UserInfoStateEvent {
+    fn cookie_name() -> &'static str {
+        "userInfo"
     }
 }
 
@@ -184,10 +149,11 @@ pub fn discord_login(
 
             Some(Event::ToSpecificClient {
                 who,
-                event: ToClientEvent::Custom {
-                    event: serde_json::to_value(StateUpdate::UserInfo { user: Some(user) })
-                        .unwrap(),
-                },
+                event: UserInfoStateEvent::as_single_update(Some(user)),
+                //     ToClientEvent::Custom {
+                //     event: serde_json::to_value(StateUpdate::UserInfo { user: Some(user) })
+                //         .unwrap(),
+                // },
             })
         }
         Err(e) => {

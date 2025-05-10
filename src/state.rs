@@ -6,15 +6,43 @@ use std::{
     marker::PhantomData,
 };
 
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 
 use crate::signal::Signal;
 
-pub trait Stateful {
-    type Data: DeserializeOwned + Default + Clone;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::server::{Event, ToClientEvent};
+
+#[cfg(target_arch = "wasm32")]
+use crate::client::PERSISTENT_VALUES;
+
+#[derive(Serialize, Deserialize)]
+pub struct StatefulClientEvent<T: Stateful, D: Serialize> {
+    pub(crate) state_key: String,
+    pub(crate) event: D,
+
+    #[serde(skip)]
+    _stateful: PhantomData<T>,
+}
+
+pub trait Stateful: Sized {
+    type Data: Serialize + DeserializeOwned + Default + Clone + 'static;
+    type Key: DeserializeOwned + Clone + Hash + Eq;
 
     fn name() -> &'static str;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn as_single_update(value: Self::Data) -> ToClientEvent {
+        ToClientEvent::Custom {
+            event: serde_json::to_value(StatefulClientEvent {
+                state_key: Self::name().to_string(),
+                event: value,
+                _stateful: PhantomData::<Self>,
+            })
+            .unwrap(),
+        }
+    }
 }
 
 pub trait SettableEvent {
@@ -23,7 +51,7 @@ pub trait SettableEvent {
 }
 
 pub trait InnerCollection {
-    type Key: DeserializeOwned + Default + Clone;
+    type Key: DeserializeOwned + Default + Clone + PartialEq;
     type Inner: DeserializeOwned + Default + Clone;
 
     fn len(&self) -> u32;
@@ -45,7 +73,15 @@ impl<T: DeserializeOwned + Default + Clone> InnerCollection for Vec<T> {
     fn set_at(&mut self, key: Self::Key, value: Self::Inner) {
         // FIXME: do a bounds check and potentially re-allocate
         // (client side state might not have the same length as the server)
-        self[key as usize] = value;
+        // self[key as usize] = value;
+
+        match self.get_mut(key as usize) {
+            Some(v) => *v = value,
+            None => {
+                self.resize(key as usize + 1, T::default());
+                self[key as usize] = value;
+            }
+        }
     }
 }
 
@@ -71,7 +107,7 @@ pub struct StateEvent<T: Stateful + Clone + 'static, M: Clone>
 where
     <T as Stateful>::Data: DeserializeOwned + Default + Clone,
 {
-    pub(crate) data: Signal<StateInner<T, M>>,
+    pub(crate) data: Signal<StateInner<T, M>, T::Key>,
 }
 
 type MultipleValueUpdateArray<T> =
@@ -80,19 +116,62 @@ pub trait MultipleValueUpdate
 where
     Self: Stateful,
     Self::Data: InnerCollection,
+    <Self::Data as InnerCollection>::Key: Serialize + DeserializeOwned,
+    <Self::Data as InnerCollection>::Inner: Serialize + DeserializeOwned,
 {
-    fn apply_update(update: MultipleValueUpdateArray<Self::Data>, data: &mut Self::Data);
+    fn apply_update(
+        update: MultipleValueUpdateArray<Self::Data>,
+        data: &mut Self::Data,
+    ) -> Vec<<Self::Data as InnerCollection>::Key>;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn as_full_update<'a>(
+        data: impl IntoIterator<Item = &'a <Self::Data as InnerCollection>::Inner>,
+    ) -> ToClientEvent {
+        ToClientEvent::Custom {
+            event: serde_json::to_value(StatefulClientEvent {
+                state_key: Self::name().to_string(),
+                event: data.into_iter().enumerate().collect::<Vec<(_, _)>>(),
+                _stateful: PhantomData::<Self>,
+            })
+            .unwrap(),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn as_update(
+        key: <Self::Data as InnerCollection>::Key,
+        value: <Self::Data as InnerCollection>::Inner,
+    ) -> ToClientEvent {
+        ToClientEvent::Custom {
+            event: serde_json::to_value(StatefulClientEvent {
+                state_key: Self::name().to_string(),
+                event: vec![(key, value)],
+                _stateful: PhantomData::<Self>,
+            })
+            .unwrap(),
+        }
+    }
 }
 
 impl<T> MultipleValueUpdate for T
 where
     T: Stateful,
     T::Data: InnerCollection,
+    <T::Data as InnerCollection>::Key: Serialize + DeserializeOwned,
+    <T::Data as InnerCollection>::Inner: Serialize + DeserializeOwned,
 {
-    fn apply_update(update: MultipleValueUpdateArray<Self::Data>, data: &mut Self::Data) {
+    fn apply_update(
+        update: MultipleValueUpdateArray<Self::Data>,
+        data: &mut Self::Data,
+    ) -> Vec<<Self::Data as InnerCollection>::Key> {
+        let keys = update.iter().map(|(key, _)| key.clone()).collect();
+
         for (key, value) in update {
             data.set_at(key, value);
         }
+
+        keys
     }
 }
 
@@ -101,8 +180,8 @@ pub struct IsSingleValue;
 #[derive(Clone, Copy)]
 pub struct IsMultipleValue;
 
-pub trait InnerUpdate {
-    fn apply_update(&mut self, update: serde_json::Value);
+pub trait InnerUpdate<T: Stateful> {
+    fn apply_update(&mut self, update: serde_json::Value) -> Vec<T::Key>;
 }
 pub trait Valuable<T> {}
 
@@ -110,6 +189,8 @@ impl<T> Valuable<IsMultipleValue> for T
 where
     T: Stateful + MultipleValueUpdate,
     T::Data: InnerCollection,
+    <T::Data as InnerCollection>::Key: Serialize + DeserializeOwned,
+    <T::Data as InnerCollection>::Inner: Serialize + DeserializeOwned,
 {
 }
 
@@ -120,49 +201,70 @@ pub struct StateInner<T: Stateful + Clone + 'static, M> {
     pub(crate) _marker: PhantomData<M>,
 }
 
-impl<T: Stateful + Clone> InnerUpdate for StateInner<T, IsSingleValue>
+impl<T: Stateful + Clone> InnerUpdate<T> for StateInner<T, IsSingleValue>
 where
     <T as Stateful>::Data: DeserializeOwned + Default + Clone,
 {
-    fn apply_update(&mut self, update: serde_json::Value) {
+    fn apply_update(&mut self, update: serde_json::Value) -> Vec<T::Key> {
         #[cfg(target_arch = "wasm32")]
         crate::client::env::log(&format!("setting single value: {update:?}"));
 
-        if let Ok(value) = serde_json::from_value::<<T as Stateful>::Data>(update) {
+        if let Ok(value) =
+            serde_json::from_value::<StatefulClientEvent<T, <T as Stateful>::Data>>(update)
+        {
             #[cfg(target_arch = "wasm32")]
             crate::client::env::log("successfully deserialized single value update");
 
-            self.inner = value;
+            if value.state_key == T::name() {
+                self.inner = value.event;
+            } else {
+                #[cfg(target_arch = "wasm32")]
+                crate::client::env::log("couldn't deserialize single value update");
+            }
         } else {
             #[cfg(target_arch = "wasm32")]
             crate::client::env::log("couldn't deserialize single value update");
         }
+
+        Vec::new()
     }
 }
 
-impl<T: MultipleValueUpdate + Clone> InnerUpdate for StateInner<T, IsMultipleValue>
+impl<T: MultipleValueUpdate + Clone> InnerUpdate<T> for StateInner<T, IsMultipleValue>
 where
-    <T as Stateful>::Data: InnerCollection + DeserializeOwned + Default + Clone,
+    <T as Stateful>::Data: InnerCollection<Key = T::Key> + DeserializeOwned + Default + Clone,
+    <T::Data as InnerCollection>::Key: Serialize + DeserializeOwned,
+    <T::Data as InnerCollection>::Inner: Serialize + DeserializeOwned,
 {
-    fn apply_update(&mut self, update: serde_json::Value) {
+    fn apply_update(&mut self, update: serde_json::Value) -> Vec<T::Key> {
+        // ) -> Vec<<T::Data as InnerCollection>::Key> {
         #[cfg(target_arch = "wasm32")]
         crate::client::env::log(&format!("setting multiple values: {update:?}"));
 
-        if let Ok(value) = serde_json::from_value::<MultipleValueUpdateArray<T::Data>>(update) {
+        if let Ok(value) = serde_json::from_value::<
+            StatefulClientEvent<T, MultipleValueUpdateArray<T::Data>>,
+        >(update)
+        {
             #[cfg(target_arch = "wasm32")]
             crate::client::env::log("successfully deserialized multiple value update");
 
-            T::apply_update(value, &mut self.inner);
+            if value.state_key == T::name() {
+                T::apply_update(value.event, &mut self.inner)
+            } else {
+                Vec::new()
+            }
         } else {
             #[cfg(target_arch = "wasm32")]
             crate::client::env::log("couldn't deserialize multiple value update");
+
+            Vec::new()
         }
     }
 }
 
 impl<T: Stateful + Clone> SettableEvent for StateEvent<T, IsSingleValue>
 where
-    StateInner<T, IsSingleValue>: InnerUpdate,
+    StateInner<T, IsSingleValue>: InnerUpdate<T>,
     <T as Stateful>::Data: DeserializeOwned + Default + Clone,
 {
     fn as_any(&self) -> &dyn Any {
@@ -172,13 +274,30 @@ where
     fn set(&mut self, value: serde_json::Value) {
         let data = self.data.get_mut();
         data.apply_update(value);
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Ok(mut to_re_render) = PERSISTENT_VALUES.to_re_render.try_borrow_mut() {
+                unsafe {
+                    for dom_id in (*self.data.inner).registered_dom_nodes.iter().cloned() {
+                        to_re_render.insert(dom_id);
+                    }
+                }
+            }
+
+            if let Some(on_update) = self.data.get().on_update {
+                on_update(&self.data.get().inner);
+            }
+        }
     }
 }
 
 impl<T: Stateful + MultipleValueUpdate + Clone> SettableEvent for StateEvent<T, IsMultipleValue>
 where
-    StateInner<T, IsMultipleValue>: InnerUpdate,
+    StateInner<T, IsMultipleValue>: InnerUpdate<T>,
     <T as Stateful>::Data: InnerCollection + DeserializeOwned + Default + Clone,
+    <T::Data as InnerCollection>::Key: Serialize + DeserializeOwned,
+    <T::Data as InnerCollection>::Inner: Serialize + DeserializeOwned,
 {
     fn as_any(&self) -> &dyn Any {
         self
@@ -186,7 +305,29 @@ where
 
     fn set(&mut self, value: serde_json::Value) {
         let data = self.data.get_mut();
-        data.apply_update(value);
+        let keys = data.apply_update(value);
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Ok(mut to_re_render) = PERSISTENT_VALUES.to_re_render.try_borrow_mut() {
+                unsafe {
+                    for dom_id in (*self.data.inner).registered_dom_nodes.iter().cloned() {
+                        to_re_render.insert(dom_id);
+                    }
+                    for (_, dom_id) in (*self.data.inner)
+                        .registered_dom_nodes_by_key
+                        .iter()
+                        .filter(|(key, _)| keys.contains(*key))
+                    {
+                        to_re_render.insert(*dom_id);
+                    }
+                }
+            }
+
+            if let Some(on_update) = self.data.get().on_update {
+                on_update(&self.data.get().inner);
+            }
+        }
     }
 }
 

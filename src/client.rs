@@ -212,7 +212,7 @@ impl PersistentState {
 }
 
 #[track_caller]
-pub fn use_signal<T: Clone + 'static>(f: impl FnOnce() -> T) -> Signal<T> {
+pub fn use_signal<T: Clone + 'static>(f: impl FnOnce() -> T) -> Signal<T, ()> {
     let location = Location::caller();
     use_signal_with_caller(f, *location)
 }
@@ -220,7 +220,7 @@ pub fn use_signal<T: Clone + 'static>(f: impl FnOnce() -> T) -> Signal<T> {
 fn use_signal_with_caller<T: Clone + 'static>(
     f: impl FnOnce() -> T,
     location: Location<'static>,
-) -> Signal<T> {
+) -> Signal<T, ()> {
     let mut signal = persist_value(
         || Signal {
             inner: Box::into_raw(Box::new(SignalData::new(f()))),
@@ -255,7 +255,7 @@ where
         self.data.get().inner
     }
 
-    pub fn get_with_index(&self, index: u32) -> <T as Stateful>::Data {
+    pub fn get_with_index(&self, index: T::Key) -> <T as Stateful>::Data {
         self.data.get_with_key(index).inner
     }
 
@@ -448,46 +448,44 @@ where
 // }
 
 // TODO: don't allow further `on_update` calls after this one (or allow chaining them?)
-// pub fn use_cookie<T: Stateful + CookieEvent + Clone + 'static>(event: T) -> StateEvent<T>
-// where
-//     <T as Stateful>::Data: GenericInnerType
-//         + GenericIndexedCollection
-//         + Serialize
-//         + DeserializeOwned
-//         + std::fmt::Debug
-//         + Default
-//         + Clone,
-// {
-//     // NOTE: this will send the `RequestFullState` event to the server
-//     let mut state_event = use_state_event(event).on_update(|value| {
-//         env::log(&format!(
-//             "updating cookie {} to {value:?}",
-//             T::cookie_name()
-//         ));
-//
-//         // TODO: tell the server what cookie we have
-//         env::update_cookie(T::cookie_name(), value);
-//
-//         // TODO: don't hide to server event behind non-wasm arch flag
-//         #[derive(serde::Serialize)]
-//         #[serde(tag = "type", rename_all = "camelCase")]
-//         enum Event {
-//             Cookie { name: String, value: String },
-//         }
-//         env::send_event_to_server(&Event::Cookie {
-//             name: T::cookie_name().to_string(),
-//             value: serde_json::to_string(&value).unwrap(),
-//         })
-//         .unwrap();
-//     });
-//
-//     if let Some(cookie) = env::get_cookie(T::cookie_name()) {
-//         let value = serde_json::from_str(&cookie).unwrap();
-//         state_event.set(value);
-//     }
-//
-//     state_event
-// }
+pub fn use_cookie<M: Clone + 'static, T: Stateful + Valuable<M> + CookieEvent + Clone + 'static>(
+    event: T,
+) -> StateEvent<T, M>
+where
+    StateEvent<T, M>: SettableEvent,
+    <T as Stateful>::Data: DeserializeOwned + Default + Clone + std::fmt::Debug,
+{
+    // NOTE: this will send the `RequestFullState` event to the server
+    let mut state_event = use_state_event(event).on_update(|value| {
+        env::log(&format!(
+            "updating cookie {} to {value:?}",
+            T::cookie_name()
+        ));
+
+        // TODO: tell the server what cookie we have
+        env::update_cookie(T::cookie_name(), value);
+
+        // TODO: don't hide to server event behind non-wasm arch flag
+        #[derive(serde::Serialize)]
+        #[serde(tag = "type", rename_all = "camelCase")]
+        enum Event {
+            Cookie { name: String, value: String },
+        }
+        env::send_event_to_server(&Event::Cookie {
+            name: T::cookie_name().to_string(),
+            value: serde_json::to_string(&value).unwrap(),
+        })
+        .unwrap();
+    });
+
+    // FIXME: need to figure out to `set` should work with `StatefulClientEvent`
+    if let Some(cookie) = env::get_cookie(T::cookie_name()) {
+        let value = serde_json::from_str(&cookie).unwrap();
+        state_event.set(value);
+    }
+
+    state_event
+}
 
 // NOTE: This is WASM so its probably fine lol
 unsafe impl Send for PersistentState {}
