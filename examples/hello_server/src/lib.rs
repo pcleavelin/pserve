@@ -4,8 +4,7 @@ pub mod client;
 #[cfg(not(target_arch = "wasm32"))]
 use pserve::server::{Event, ToClientEvent};
 
-#[cfg(target_arch = "wasm32")]
-use pserve::client::{DataType, StateDataType, Stateful};
+use pserve::state::{Stateful, Valuable};
 
 use serde::{Deserialize, Serialize};
 use std::hash::Hash;
@@ -46,100 +45,53 @@ pub enum ClientEvent {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum FullState {
-    #[serde(rename_all = "camelCase")]
-    CheckBox { check_boxes: Vec<bool> },
-    #[serde(rename_all = "camelCase")]
-    MemeList { memes: Vec<String> },
-}
-
-impl FullState {
-    pub fn from_name(state: &State, name: String) -> Self {
-        match name.as_str() {
-            "checkBoxes" => FullState::CheckBox {
-                check_boxes: state.check_boxes.to_vec(),
-            },
-            "memeList" => FullState::MemeList {
-                memes: state.meme_list.to_vec(),
-            },
-            _ => panic!("unknown full state name: {name}"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum StateUpdate {
-    #[serde(rename_all = "camelCase")]
-    CheckBox { check_boxes: Vec<(u32, bool)> },
-    #[serde(rename_all = "camelCase")]
-    MemeList { memes: Vec<(u32, String)> },
-}
-
-#[cfg(target_arch = "wasm32")]
-impl StateDataType for StateUpdate {
-    fn data_type(&self) -> DataType {
-        match self {
-            StateUpdate::CheckBox { check_boxes } => {
-                DataType::Multiple(check_boxes.iter().map(|(id, _)| *id).collect())
-            }
-            StateUpdate::MemeList { memes } => {
-                DataType::Multiple(memes.iter().map(|(id, _)| *id).collect())
-            }
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 pub struct MySuperCoolSingleValueStateEvent;
 
-#[cfg(target_arch = "wasm32")]
-impl pserve::client::Stateful for MySuperCoolSingleValueStateEvent {
-    type Full = FullState;
+impl pserve::state::Stateful for MySuperCoolSingleValueStateEvent {
+    // type Full = FullState;
     // type Update = StateUpdate;
-    type EventData = String;
+    type Data = String;
 
-    fn name() -> String {
-        "mySuperCoolSingleValueStateEvent".to_string()
+    fn name() -> &'static str {
+        "mySuperCoolSingleValueStateEvent"
     }
-    fn len(data: &Self::EventData) -> usize {
-        data.len()
-    }
+    // fn len(data: &Self::EventData) -> usize {
+    //     data.len()
+    // }
 
-    fn replace(full: Self::Full, data: &mut Self::EventData) {
-        // pserve::client::env::log("replacing all check boxes");
-        // if let FullState::CheckBox { mut check_boxes } = full {
-        //     data.clear();
-        //     data.append(&mut check_boxes);
-        // }
-    }
+    // fn replace(full: Self::Full, data: &mut Self::EventData) {
+    // pserve::client::env::log("replacing all check boxes");
+    // if let FullState::CheckBox { mut check_boxes } = full {
+    //     data.clear();
+    //     data.append(&mut check_boxes);
+    // }
+    // }
 }
+impl pserve::state::Valuable<pserve::state::IsSingleValue> for MySuperCoolSingleValueStateEvent {}
 
 #[derive(Clone, Copy)]
 pub struct CheckBoxStateEvent;
 
-#[cfg(target_arch = "wasm32")]
-impl pserve::client::Stateful for CheckBoxStateEvent {
-    type Full = FullState;
+impl pserve::state::Stateful for CheckBoxStateEvent {
+    // type Full = FullState;
     // type Update = StateUpdate;
-    type EventData = Vec<bool>;
+    type Data = Vec<bool>;
 
-    fn name() -> String {
-        "checkBoxes".to_string()
+    fn name() -> &'static str {
+        "checkBoxes"
     }
-    fn len(data: &Self::EventData) -> usize {
-        data.len()
-    }
+    // fn len(data: &Self::EventData) -> usize {
+    //     data.len()
+    // }
 
-    fn replace(full: Self::Full, data: &mut Self::EventData) {
-        // pserve::client::env::log("replacing all check boxes");
-        // if let FullState::CheckBox { mut check_boxes } = full {
-        //     data.clear();
-        //     data.append(&mut check_boxes);
-        // }
-    }
+    // fn replace(full: Self::Full, data: &mut Self::EventData) {
+    // pserve::client::env::log("replacing all check boxes");
+    // if let FullState::CheckBox { mut check_boxes } = full {
+    //     data.clear();
+    //     data.append(&mut check_boxes);
+    // }
+    // }
 }
 
 // {
@@ -161,26 +113,25 @@ impl pserve::client::Stateful for CheckBoxStateEvent {
 #[derive(Clone, Copy)]
 pub struct MemeListStateEvent;
 
-#[cfg(target_arch = "wasm32")]
-impl pserve::client::Stateful for MemeListStateEvent {
-    type Full = FullState;
+impl pserve::state::Stateful for MemeListStateEvent {
+    // type Full = FullState;
     // type Update = StateUpdate;
-    type EventData = Vec<String>;
+    type Data = Vec<String>;
 
-    fn name() -> String {
-        "memeList".to_string()
+    fn name() -> &'static str {
+        "memeList"
     }
-    fn len(data: &Self::EventData) -> usize {
-        data.len()
-    }
+    // fn len(data: &Self::EventData) -> usize {
+    //     data.len()
+    // }
 
-    fn replace(full: Self::Full, data: &mut Self::EventData) {
-        pserve::client::env::log("replacing all memes");
-        if let FullState::MemeList { mut memes } = full {
-            data.clear();
-            data.append(&mut memes);
-        }
-    }
+    // fn replace(full: Self::Full, data: &mut Self::EventData) {
+    //     pserve::client::env::log("replacing all memes");
+    //     if let FullState::MemeList { mut memes } = full {
+    //         data.clear();
+    //         data.append(&mut memes);
+    //     }
+    // }
 }
 
 // {
@@ -201,12 +152,34 @@ impl pserve::client::Stateful for MemeListStateEvent {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn request_full_state(state: &mut State, who: SocketAddr, name: String) -> Option<Event> {
-    Some(Event::ToSpecificClient {
-        who,
-        event: ToClientEvent::Custom {
-            event: serde_json::to_value(FullState::from_name(state, name)).unwrap(),
-        },
-    })
+    // Some(Event::ToSpecificClient {
+    //     who,
+    //     event: ToClientEvent::Custom {
+    //         event: todo!(), //serde_json::to_value(FullState::from_name(state, name)).unwrap(),
+    //     },
+    // })
+
+    match name.as_str() {
+        "memeList" => Some(Event::ToSpecificClient {
+            who,
+            event: ToClientEvent::Custom {
+                event: serde_json::to_value(state.meme_list.clone()).unwrap(),
+            },
+        }),
+        "checkBoxes" => Some(Event::ToSpecificClient {
+            who,
+            event: ToClientEvent::Custom {
+                event: serde_json::to_value(state.check_boxes.to_vec()).unwrap(),
+            },
+        }),
+        "mySuperCoolSingleValueStateEvent" => Some(Event::ToSpecificClient {
+            who,
+            event: ToClientEvent::Custom {
+                event: serde_json::to_value("Hello, I'm different".to_string()).unwrap(),
+            },
+        }),
+        _ => None,
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -245,12 +218,15 @@ pub fn toggle_check_box(
 
     state.check_boxes[id as usize] = !state.check_boxes[id as usize];
 
-    Some(Event::ToAllClients(ToClientEvent::Custom {
-        event: serde_json::to_value(StateUpdate::CheckBox {
-            check_boxes: vec![(id, state.check_boxes[id as usize])],
-        })
-        .unwrap(),
-    }))
+    None
+
+    // Some(Event::ToAllClients(ToClientEvent::Custom {
+    //     event: todo!(),
+    //     // event: serde_json::to_value(StateUpdate::CheckBox {
+    //     //     check_boxes: vec![(id, state.check_boxes[id as usize])],
+    //     // })
+    //     // .unwrap(),
+    // }))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -264,10 +240,13 @@ pub fn add_meme(state: &mut State, _who: SocketAddr, value: serde_json::Value) -
 
     state.meme_list.push(meme.clone());
 
-    Some(Event::ToAllClients(ToClientEvent::Custom {
-        event: serde_json::to_value(StateUpdate::MemeList {
-            memes: vec![(state.meme_list.len() as u32 - 1, meme)],
-        })
-        .unwrap(),
-    }))
+    None
+
+    // Some(Event::ToAllClients(ToClientEvent::Custom {
+    //     event: todo!(),
+    //     // event: serde_json::to_value(StateUpdate::MemeList {
+    //     //     memes: vec![(state.meme_list.len() as u32 - 1, meme)],
+    //     // })
+    //     // .unwrap(),
+    // }))
 }

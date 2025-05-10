@@ -1,5 +1,6 @@
-use pserve::client::{Signal, StateEvent, use_signal, use_state_event};
+use pserve::client::{use_signal, use_state_event};
 use pserve::dom::*;
+use pserve::signal::Signal;
 
 use crate::{CheckBoxStateEvent, ClientEvent, MemeListStateEvent, NUMBER_OF_CHECKBOXES};
 
@@ -133,7 +134,7 @@ fn meme_list() -> DomNodeBuilder {
         .push("ul", move || {
             let mut n = DomNodeBuilder::default();
 
-            for i in 0..memes.len() {
+            for i in 0..memes.get().len() {
                 n = n.push("li", move || {
                     DomNodeBuilder::default().push("p", move || {
                         let memes = memes.get_with_index(i as u32);
@@ -166,7 +167,11 @@ fn checkboxes() -> DomNodeBuilder {
     DomNodeBuilder::default().push("div", move || {
         let mut n = DomNodeBuilder::default();
 
-        n = n.push("p", || "A lotta Checkboxes".into());
+        n = n
+            .push("p", || "A lotta Checkboxes".into())
+            .push("p", move || {
+                my_super_cool_single_value_state_event.get().as_str().into()
+            });
 
         for i in 0..NUMBER_OF_CHECKBOXES {
             let check_boxes = check_boxes.clone();

@@ -1,6 +1,11 @@
 extern crate alloc;
 
 use crate::dom::{DomNodeBuilt, DomNodeBuiltBody, DomNodeUnbuilt, DomNodeUnbuiltBody};
+use crate::signal::{Signal, SignalData};
+use crate::state::{
+    InnerCollection, InnerUpdate, MultipleValueUpdate, SettableEvent, StateEvent, StateInner,
+    Stateful, Valuable,
+};
 use alloc::rc::Rc;
 use core::{
     any::Any,
@@ -12,6 +17,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::marker::PhantomData;
 use std::str::FromStr;
 
 pub mod env {
@@ -116,7 +122,7 @@ extern "C" fn handle_custom_event(value: *mut u8, len: i32) {
 
     let mut event_subscriptions = PERSISTENT_VALUES.event_subscriptions.borrow_mut();
     for event in event_subscriptions.values_mut() {
-        // event.set(json_value.clone());
+        event.set(json_value.clone());
     }
 }
 
@@ -183,10 +189,10 @@ extern "C" fn rerender() {
 
 pub struct PersistentState {
     cell: LazyCell<RefCell<HashMap<Location<'static>, Box<dyn Any>>>>,
-    event_subscriptions: LazyCell<RefCell<HashMap<TypeId, Box<dyn SuperSettableEvent + 'static>>>>,
+    event_subscriptions: LazyCell<RefCell<HashMap<TypeId, Box<dyn SettableEvent>>>>,
     builders: LazyCell<RefCell<HashMap<u32, DomNodeUnbuilt>>>,
     built_nodes: LazyCell<RefCell<HashMap<u32, DomNodeBuilt>>>,
-    to_re_render: LazyCell<RefCell<HashSet<u32>>>,
+    pub(crate) to_re_render: LazyCell<RefCell<HashSet<u32>>>,
 }
 
 impl PersistentState {
@@ -202,97 +208,6 @@ impl PersistentState {
     }
     pub fn get_built_nodes_mut<'a>(&'a self) -> RefMut<'a, HashMap<u32, DomNodeBuilt>> {
         self.built_nodes.borrow_mut()
-    }
-}
-
-#[derive(Clone)]
-pub struct Signal<T: Clone> {
-    // TODO: uh, don't use a raw pointer (maybe just a Cell would be fine?)
-    inner: *mut SignalData<T>,
-}
-
-pub struct SignalData<T: Clone> {
-    value: T,
-    registered_dom_nodes: Vec<u32>,
-    registered_dom_nodes_by_key: HashMap<u32, u32>,
-}
-
-impl<T: Clone> SignalData<T> {
-    pub fn new(value: T) -> Self {
-        Self {
-            value,
-            registered_dom_nodes: Vec::new(),
-            registered_dom_nodes_by_key: HashMap::new(),
-        }
-    }
-}
-
-// NOTE: HAHAHAHA
-impl<T: Clone> Copy for Signal<T> {}
-
-impl<T: Clone> Signal<T> {
-    pub fn reset(&mut self) {
-        // FIXME: yolo
-        unsafe {
-            (*self.inner).registered_dom_nodes.clear();
-            (*self.inner).registered_dom_nodes_by_key.clear();
-        }
-    }
-
-    fn get_mut(&mut self) -> &mut T {
-        // FIXME: yolo
-        unsafe { &mut (*self.inner).value }
-    }
-
-    pub fn get(&self) -> T {
-        let dom_id = current_dom_id();
-
-        if dom_id > 0 {
-            // FIXME: yolo
-            unsafe {
-                (*self.inner).registered_dom_nodes.push(dom_id);
-                (*self.inner).registered_dom_nodes.sort_unstable();
-                (*self.inner).registered_dom_nodes.dedup();
-            }
-        }
-
-        // FIXME: yolo
-        unsafe { (*self.inner).value.clone() }
-    }
-
-    pub fn get_with_key(&self, index: u32) -> T {
-        let dom_id = current_dom_id();
-
-        if dom_id > 0 {
-            // FIXME: yolo
-            unsafe {
-                (*self.inner)
-                    .registered_dom_nodes_by_key
-                    .insert(index, dom_id);
-            }
-        }
-
-        // FIXME: yolo
-        unsafe { (*self.inner).value.clone() }
-    }
-
-    #[track_caller]
-    pub fn set(&self, value: T) {
-        // FIXME: yolo
-        unsafe {
-            (*self.inner).value = value;
-        }
-
-        // FIXME: yolo
-        unsafe {
-            for dom_id in (*self.inner).registered_dom_nodes.iter().cloned() {
-                PERSISTENT_VALUES.to_re_render.borrow_mut().insert(dom_id);
-            }
-
-            for (_, dom_id) in (*self.inner).registered_dom_nodes_by_key.iter() {
-                PERSISTENT_VALUES.to_re_render.borrow_mut().insert(*dom_id);
-            }
-        }
     }
 }
 
@@ -318,129 +233,38 @@ fn use_signal_with_caller<T: Clone + 'static>(
     signal
 }
 
-pub trait GenericType {}
-
-impl<T: DeserializeOwned> GenericType for T {}
-
-pub trait GenericInnerType: GenericType {
-    type Key: DeserializeOwned;
-    type Inner: DeserializeOwned;
-}
-pub trait GenericIndexedCollection: GenericInnerType {
-    fn set_at(&mut self, key: Self::Key, value: Self::Inner);
-}
-
-impl<T: DeserializeOwned> GenericInnerType for Vec<T> {
-    type Key = u32;
-    type Inner = T;
-}
-
-impl<T: DeserializeOwned> GenericIndexedCollection for Vec<T> {
-    fn set_at(&mut self, key: Self::Key, value: Self::Inner) {
-        // FIXME: check bounds, Vec might not be the same size as the server state
-        self[key as usize] = value;
-    }
-}
-
-pub trait Stateful {
-    type Full: serde::de::DeserializeOwned;
-    // type Update: StateDataType + serde::de::DeserializeOwned;
-    type EventData;
-
-    fn name() -> String;
-    fn len(data: &Self::EventData) -> usize;
-
-    fn replace(full: Self::Full, data: &mut Self::EventData);
-    // fn apply_update(update: Self::Update, data: &mut Self::EventData);
-}
-
-pub trait SingleValueStateful
-where
-    Self: Stateful,
-{
-    fn apply_update(update: Self::EventData, data: &mut Self::EventData);
-}
-
-pub trait MultipleValueStateful<T: GenericInnerType>: Stateful
-where
-    Self: Stateful,
-{
-    fn apply_update(update: Vec<(T::Key, T::Inner)>, data: &mut Self::EventData);
-}
-
-impl<T: Stateful> MultipleValueStateful<<T as Stateful>::EventData> for T
-where
-    <T as Stateful>::EventData: GenericInnerType + GenericIndexedCollection,
-{
-    fn apply_update(
-        update: Vec<(
-            <T::EventData as GenericInnerType>::Key,
-            <T::EventData as GenericInnerType>::Inner,
-        )>,
-        data: &mut Self::EventData,
-    ) {
-        for (key, value) in update {
-            data.set_at(key, value);
-        }
-    }
-}
-
 pub trait CookieEvent {
     fn cookie_name() -> &'static str;
 }
 
-trait SuperSettableEvent {
-    fn as_any(&self) -> &dyn Any;
-    fn set(&mut self, value: serde_json::Value);
-}
-
-trait SettableEvent<Marker>: SuperSettableEvent {
-    fn set(&mut self, value: serde_json::Value);
-}
-
-pub trait StateDataType {
-    fn data_type(&self) -> DataType;
-}
-
-pub enum DataType {
-    Single,
-    Multiple(Vec<u32>),
-}
-
 // TODO: change `data` to be an enum of Single and Multiple instead of the crazy type shenanigans
 // I'm doing above
-#[derive(Clone, Copy)]
-pub struct StateEvent<T: Stateful + Clone + 'static>
-where
-    <T as Stateful>::EventData: DeserializeOwned + Default + Clone,
-{
-    data: Signal<StateInner<<T as Stateful>::EventData>>,
-}
+// #[derive(Clone, Copy)]
+// pub struct StateEvent<T: Stateful + Clone + 'static, M: Clone + 'static>
+// where
+//     <T as Stateful>::Data: DeserializeOwned + Default + Clone,
+// {
+//     data: Signal<StateInner<T, M>>,
+// }
 
-#[derive(Clone, Copy)]
-pub struct StateInner<T: Default + Clone> {
-    inner: T,
-    on_update: Option<fn(&T)>,
-}
-
-impl<T: Stateful + Clone> StateEvent<T>
+impl<T: Stateful + Clone, M: Clone + 'static> StateEvent<T, M>
 where
-    <T as Stateful>::EventData: DeserializeOwned + Default + Clone,
+    <T as Stateful>::Data: DeserializeOwned + Default + Clone,
 {
-    pub fn get(&self) -> <T as Stateful>::EventData {
+    pub fn get(&self) -> <T as Stateful>::Data {
         self.data.get().inner
     }
 
-    pub fn get_with_index(&self, index: u32) -> <T as Stateful>::EventData {
+    pub fn get_with_index(&self, index: u32) -> <T as Stateful>::Data {
         self.data.get_with_key(index).inner
     }
 
-    pub fn len(&self) -> usize {
-        // TODO: use a non-cloning method
-        T::len(&self.data.get().inner)
-    }
+    // pub fn len(&self) -> usize {
+    //     // TODO: use a non-cloning method
+    //     T::len(&self.data.get().inner)
+    // }
 
-    pub fn on_update(mut self, f: fn(&<T as Stateful>::EventData)) -> Self {
+    pub fn on_update(mut self, f: fn(&<T as Stateful>::Data)) -> Self {
         self.data.get_mut().on_update = Some(f);
         self
     }
@@ -448,7 +272,7 @@ where
 
 // impl<T: Stateful + Clone> SettableEvent for StateEvent<T>
 // where
-//     <T as Stateful>::EventData: DeserializeOwned + Default + Clone,
+//     <T as Stateful>::Data: DeserializeOwned + Default + Clone,
 // {
 //     fn as_any(&self) -> &dyn Any {
 //         self
@@ -477,58 +301,6 @@ where
 //     }
 // }
 // }
-
-struct IsSingleValue;
-struct IsMultipleValue;
-
-impl<T> SuperSettableEvent for T
-where
-    T: SettableEvent<IsSingleValue> + 'static,
-{
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn set(&mut self, value: serde_json::Value) {}
-}
-
-impl<T> SuperSettableEvent for T
-where
-    T: SettableEvent<IsMultipleValue> + 'static,
-{
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn set(&mut self, value: serde_json::Value) {}
-}
-
-impl<T> SettableEvent<IsSingleValue> for StateEvent<T>
-where
-    T: SingleValueStateful + Clone,
-    <T as Stateful>::EventData: GenericType + DeserializeOwned + Default + Clone,
-{
-    fn set(&mut self, value: serde_json::Value) {}
-}
-
-impl<T> SettableEvent<IsMultipleValue> for StateEvent<T>
-where
-    T: MultipleValueStateful<<T as Stateful>::EventData> + Clone,
-    <T as Stateful>::EventData:
-        GenericInnerType + GenericIndexedCollection + DeserializeOwned + Default + Clone,
-{
-    fn set(&mut self, value: serde_json::Value) {
-        if let Ok(update) = serde_json::from_value::<
-            Vec<(
-                <T::EventData as GenericInnerType>::Key,
-                <T::EventData as GenericInnerType>::Inner,
-            )>,
-        >(value.clone())
-        {
-            env::log("got partial state");
-        }
-    }
-}
 
 // else if let Ok(update) = serde_json::from_value::<<T as Stateful>::Update>(value.clone())
 // {
@@ -564,7 +336,7 @@ where
 //     } else {
 //         env::log("no on_update");
 //     }
-// } else if let Ok(value) = serde_json::from_value::<<T as Stateful>::EventData>(value) {
+// } else if let Ok(value) = serde_json::from_value::<<T as Stateful>::Data>(value) {
 //     env::log("got exact state");
 //
 //     unsafe {
@@ -590,23 +362,27 @@ where
 //     }
 // }
 
-pub fn use_state_event<T: Stateful + Clone + 'static>(event: T) -> StateEvent<T>
+pub fn use_state_event<M: Clone + 'static, T: Stateful + Valuable<M> + Clone + 'static>(
+    event: T,
+) -> StateEvent<T, M>
 where
-    <T as Stateful>::EventData: GenericType + DeserializeOwned + Default + Clone,
+    StateEvent<T, M>: SettableEvent,
+    <T as Stateful>::Data: DeserializeOwned + Default + Clone,
 {
     let mut event_subscriptions = PERSISTENT_VALUES.event_subscriptions.borrow_mut();
 
     if let Some(state_event) = event_subscriptions.get(&TypeId::of::<T>()) {
         let state_event = (*state_event)
             .as_any()
-            .downcast_ref::<StateEvent<T>>()
+            .downcast_ref::<StateEvent<T, M>>()
             .unwrap();
 
         return state_event.clone();
     } else {
         let data = SignalData::new(StateInner {
-            inner: <T as Stateful>::EventData::default(),
+            inner: <T as Stateful>::Data::default(),
             on_update: None,
+            _marker: PhantomData,
         });
         let state_event = StateEvent {
             data: Signal {
@@ -622,7 +398,10 @@ where
         enum Event {
             RequestFullState { name: String },
         }
-        env::send_event_to_server(&Event::RequestFullState { name: T::name() }).unwrap();
+        env::send_event_to_server(&Event::RequestFullState {
+            name: T::name().to_string(),
+        })
+        .unwrap();
 
         state_event
     }
@@ -630,8 +409,8 @@ where
 
 // pub fn use_state_event<T>(event: T)
 // where
-//     T: MultipleValueStateful<<T as Stateful>::EventData> + Clone + 'static,
-//     <T as Stateful>::EventData:
+//     T: MultipleValueStateful<<T as Stateful>::Data> + Clone + 'static,
+//     <T as Stateful>::Data:
 //         GenericInnerType + GenericIndexedCollection + DeserializeOwned + Default + Clone,
 // {
 //     let mut event_subscriptions = PERSISTENT_VALUES.event_subscriptions.borrow_mut();
@@ -645,7 +424,7 @@ where
 //         return state_event.clone();
 //     } else {
 //         let data = SignalData::new(StateInner {
-//             inner: <T as Stateful>::EventData::default(),
+//             inner: <T as Stateful>::Data::default(),
 //             on_update: None,
 //         });
 //         let state_event = StateEvent {
@@ -671,7 +450,7 @@ where
 // TODO: don't allow further `on_update` calls after this one (or allow chaining them?)
 // pub fn use_cookie<T: Stateful + CookieEvent + Clone + 'static>(event: T) -> StateEvent<T>
 // where
-//     <T as Stateful>::EventData: GenericInnerType
+//     <T as Stateful>::Data: GenericInnerType
 //         + GenericIndexedCollection
 //         + Serialize
 //         + DeserializeOwned
