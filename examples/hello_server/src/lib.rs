@@ -93,12 +93,37 @@ impl StateDataType for StateUpdate {
 }
 
 #[derive(Clone, Copy)]
+pub struct MySuperCoolSingleValueStateEvent;
+
+#[cfg(target_arch = "wasm32")]
+impl pserve::client::Stateful for MySuperCoolSingleValueStateEvent {
+    type Full = FullState;
+    // type Update = StateUpdate;
+    type EventData = String;
+
+    fn name() -> String {
+        "mySuperCoolSingleValueStateEvent".to_string()
+    }
+    fn len(data: &Self::EventData) -> usize {
+        data.len()
+    }
+
+    fn replace(full: Self::Full, data: &mut Self::EventData) {
+        // pserve::client::env::log("replacing all check boxes");
+        // if let FullState::CheckBox { mut check_boxes } = full {
+        //     data.clear();
+        //     data.append(&mut check_boxes);
+        // }
+    }
+}
+
+#[derive(Clone, Copy)]
 pub struct CheckBoxStateEvent;
 
 #[cfg(target_arch = "wasm32")]
 impl pserve::client::Stateful for CheckBoxStateEvent {
     type Full = FullState;
-    type Update = StateUpdate;
+    // type Update = StateUpdate;
     type EventData = Vec<bool>;
 
     fn name() -> String {
@@ -108,28 +133,30 @@ impl pserve::client::Stateful for CheckBoxStateEvent {
         data.len()
     }
 
-    fn replace(full: Self::Full, data: &mut Vec<bool>) {
-        pserve::client::env::log("replacing all check boxes");
-        if let FullState::CheckBox { mut check_boxes } = full {
-            data.clear();
-            data.append(&mut check_boxes);
-        }
-    }
-
-    fn apply_update(update: Self::Update, data: &mut Vec<bool>) {
-        if let StateUpdate::CheckBox { check_boxes } = update {
-            for (id, value) in check_boxes {
-                match data.get_mut(id as usize) {
-                    Some(v) => *v = value,
-                    None => {
-                        data.resize(id as usize + 1, false);
-                        data[id as usize] = value;
-                    }
-                }
-            }
-        }
+    fn replace(full: Self::Full, data: &mut Self::EventData) {
+        // pserve::client::env::log("replacing all check boxes");
+        // if let FullState::CheckBox { mut check_boxes } = full {
+        //     data.clear();
+        //     data.append(&mut check_boxes);
+        // }
     }
 }
+
+// {
+//     fn apply_update(update: Self::Update, data: &mut Vec<bool>) {
+//         if let StateUpdate::CheckBox { check_boxes } = update {
+//             for (id, value) in check_boxes {
+//                 match data.get_mut(id as usize) {
+//                     Some(v) => *v = value,
+//                     None => {
+//                         data.resize(id as usize + 1, false);
+//                         data[id as usize] = value;
+//                     }
+//                 }
+//             }
+//         }
+//     }
+// }
 
 #[derive(Clone, Copy)]
 pub struct MemeListStateEvent;
@@ -137,7 +164,7 @@ pub struct MemeListStateEvent;
 #[cfg(target_arch = "wasm32")]
 impl pserve::client::Stateful for MemeListStateEvent {
     type Full = FullState;
-    type Update = StateUpdate;
+    // type Update = StateUpdate;
     type EventData = Vec<String>;
 
     fn name() -> String {
@@ -154,21 +181,23 @@ impl pserve::client::Stateful for MemeListStateEvent {
             data.append(&mut memes);
         }
     }
-
-    fn apply_update(update: Self::Update, data: &mut Self::EventData) {
-        if let StateUpdate::MemeList { memes } = update {
-            for (id, value) in memes {
-                match data.get_mut(id as usize) {
-                    Some(v) => *v = value,
-                    None => {
-                        data.resize(id as usize + 1, "".to_string());
-                        data[id as usize] = value;
-                    }
-                }
-            }
-        }
-    }
 }
+
+// {
+//     fn apply_update(update: Self::Update, data: &mut Self::EventData) {
+//         if let StateUpdate::MemeList { memes } = update {
+//             for (id, value) in memes {
+//                 match data.get_mut(id as usize) {
+//                     Some(v) => *v = value,
+//                     None => {
+//                         data.resize(id as usize + 1, "".to_string());
+//                         data[id as usize] = value;
+//                     }
+//                 }
+//             }
+//         }
+//     }
+// }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn request_full_state(state: &mut State, who: SocketAddr, name: String) -> Option<Event> {

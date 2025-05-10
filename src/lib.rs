@@ -4,5 +4,7 @@ pub mod server;
 #[cfg(target_arch = "wasm32")]
 pub mod client;
 
+pub mod state;
+
 // pub mod htmx;
 pub mod dom;

@@ -160,6 +160,8 @@ fn meme_list() -> DomNodeBuilder {
 
 fn checkboxes() -> DomNodeBuilder {
     let check_boxes = use_state_event(CheckBoxStateEvent);
+    let my_super_cool_single_value_state_event =
+        use_state_event(crate::MySuperCoolSingleValueStateEvent);
 
     DomNodeBuilder::default().push("div", move || {
         let mut n = DomNodeBuilder::default();
