@@ -2,14 +2,17 @@ extern crate alloc;
 
 use crate::dom::{DomNodeBuilt, DomNodeBuiltBody, DomNodeUnbuilt, DomNodeUnbuiltBody};
 use crate::signal::{Signal, SignalData};
-use crate::state::{SettableEvent, StateEvent, StateInner, Stateful, Valuable};
+use crate::state::{
+    InnerCollection, MultipleValueUpdate, PartialStateEvent, PartialStateInner, SettableEvent,
+    StateEvent, StateInner, Stateful, Valuable,
+};
 use core::{
     any::Any,
     cell::{LazyCell, Ref, RefCell, RefMut},
     panic::Location,
     sync::atomic::{AtomicU32, Ordering},
 };
-use serde::de::DeserializeOwned;
+use serde::{Serialize, de::DeserializeOwned};
 use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
@@ -118,6 +121,11 @@ extern "C" fn handle_custom_event(value: *mut u8, len: i32) {
     for event in event_subscriptions.values_mut() {
         event.set(json_value.clone());
     }
+
+    let mut event_subscriptions = PERSISTENT_VALUES.partial_event_subscriptions.borrow_mut();
+    for event in event_subscriptions.values_mut() {
+        event.set(json_value.clone());
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -184,6 +192,7 @@ extern "C" fn rerender() {
 pub struct PersistentState {
     cell: LazyCell<RefCell<HashMap<Location<'static>, Box<dyn Any>>>>,
     event_subscriptions: LazyCell<RefCell<HashMap<TypeId, Box<dyn SettableEvent>>>>,
+    partial_event_subscriptions: LazyCell<RefCell<HashMap<TypeId, Box<dyn SettableEvent>>>>,
     builders: LazyCell<RefCell<HashMap<u32, DomNodeUnbuilt>>>,
     built_nodes: LazyCell<RefCell<HashMap<u32, DomNodeBuilt>>>,
     pub(crate) to_re_render: LazyCell<RefCell<HashSet<u32>>>,
@@ -231,17 +240,7 @@ pub trait CookieEvent {
     fn cookie_name() -> &'static str;
 }
 
-// TODO: change `data` to be an enum of Single and Multiple instead of the crazy type shenanigans
-// I'm doing above
-// #[derive(Clone, Copy)]
-// pub struct StateEvent<T: Stateful + Clone + 'static, M: Clone + 'static>
-// where
-//     <T as Stateful>::Data: DeserializeOwned + Default + Clone,
-// {
-//     data: Signal<StateInner<T, M>>,
-// }
-
-impl<T: Stateful + Clone, M: Clone + 'static> StateEvent<T, M>
+impl<T: Stateful + Clone, M: Clone + Copy + 'static> StateEvent<T, M>
 where
     <T as Stateful>::Data: DeserializeOwned + Default + Clone,
 {
@@ -253,110 +252,62 @@ where
         self.data.get_with_key(index).inner
     }
 
-    // pub fn len(&self) -> usize {
-    //     // TODO: use a non-cloning method
-    //     T::len(&self.data.get().inner)
-    // }
-
     pub fn on_update(mut self, f: fn(&<T as Stateful>::Data)) -> Self {
         self.data.get_mut().on_update = Some(f);
         self
     }
 }
 
-// impl<T: Stateful + Clone> SettableEvent for StateEvent<T>
-// where
-//     <T as Stateful>::Data: DeserializeOwned + Default + Clone,
-// {
-//     fn as_any(&self) -> &dyn Any {
-//         self
-//     }
+/// NOTE: you can only partially subscribe to a single key of a state event
+pub fn use_partial_state_event<T: MultipleValueUpdate + Clone + 'static>(
+    _: T,
+    key: <T::Data as InnerCollection>::Key,
+) -> PartialStateEvent<T>
+where
+    PartialStateEvent<T>: SettableEvent,
+    <T as Stateful>::Data: InnerCollection + DeserializeOwned + Default + Clone,
+    <T::Data as InnerCollection>::Key: Serialize + DeserializeOwned,
+    <T::Data as InnerCollection>::Inner: Serialize + DeserializeOwned,
+{
+    let mut event_subscriptions = PERSISTENT_VALUES.partial_event_subscriptions.borrow_mut();
 
-// fn set(&mut self, value: serde_json::Value) {
-//     if let Ok(full) = serde_json::from_value::<<T as Stateful>::Full>(value.clone()) {
-//         env::log("got full state");
-//
-//         unsafe {
-//             if let Ok(mut to_re_render) = PERSISTENT_VALUES.to_re_render.try_borrow_mut() {
-//                 for dom_id in (*self.data.inner).registered_dom_nodes.iter().cloned() {
-//                     to_re_render.insert(dom_id);
-//                 }
-//                 for dom_id in (*self.data.inner).registered_dom_nodes_by_key.values() {
-//                     to_re_render.insert(*dom_id);
-//                 }
-//             }
-//         }
-//
-//         T::replace(full, &mut self.data.get_mut().inner);
-//
-//         if let Some(on_update) = self.data.get().on_update {
-//             on_update(&self.data.get().inner);
-//         }
-//     }
-// }
-// }
+    if let Some(state_event) = event_subscriptions.get_mut(&TypeId::of::<T>()) {
+        let state_event = (*state_event)
+            .as_any_mut()
+            .downcast_mut::<PartialStateEvent<T>>()
+            .unwrap();
+        state_event.data.get_mut().key = key;
 
-// else if let Ok(update) = serde_json::from_value::<<T as Stateful>::Update>(value.clone())
-// {
-//     env::log("got partial state");
-//
-//     if let Ok(mut to_re_render) = PERSISTENT_VALUES.to_re_render.try_borrow_mut() {
-//         match update.data_type() {
-//             DataType::Single => unsafe {
-//                 for dom_id in (*self.data.inner).registered_dom_nodes.iter().cloned() {
-//                     to_re_render.insert(dom_id);
-//                 }
-//             },
-//             DataType::Multiple(keys) => unsafe {
-//                 for dom_id in (*self.data.inner).registered_dom_nodes.iter().cloned() {
-//                     to_re_render.insert(dom_id);
-//                 }
-//                 for (_, dom_id) in (*self.data.inner)
-//                     .registered_dom_nodes_by_key
-//                     .iter()
-//                     .filter(|(key, _)| keys.contains(key))
-//                 {
-//                     to_re_render.insert(*dom_id);
-//                 }
-//             },
-//         }
-//     }
-//
-//     let mut data = self.data.get_mut();
-//     T::apply_update(update, &mut data.inner);
-//
-//     if let Some(on_update) = data.on_update {
-//         on_update(&data.inner);
-//     } else {
-//         env::log("no on_update");
-//     }
-// } else if let Ok(value) = serde_json::from_value::<<T as Stateful>::Data>(value) {
-//     env::log("got exact state");
-//
-//     unsafe {
-//         if let Ok(mut to_re_render) = PERSISTENT_VALUES.to_re_render.try_borrow_mut() {
-//             for dom_id in (*self.data.inner).registered_dom_nodes.iter().cloned() {
-//                 to_re_render.insert(dom_id);
-//             }
-//             for dom_id in (*self.data.inner).registered_dom_nodes_by_key.values() {
-//                 to_re_render.insert(*dom_id);
-//             }
-//         }
-//     }
-//
-//     let mut data = self.data.get_mut();
-//     data.inner = value;
-//
-//     if let Some(on_update) = data.on_update {
-//         on_update(&data.inner);
-//     } else {
-//         env::log("no on_update");
-//     }
-// }
-//     }
-// }
+        return state_event.clone();
+    } else {
+        let data = SignalData::new(PartialStateInner {
+            key,
+            data: <T::Data as InnerCollection>::Inner::default(),
+        });
+        let state_event = PartialStateEvent {
+            data: Signal {
+                inner: Box::into_raw(Box::new(data)),
+            },
+        };
 
-pub fn use_state_event<M: Clone + 'static, T: Stateful + Valuable<M> + Clone + 'static>(
+        event_subscriptions.insert(TypeId::of::<T>(), Box::new(state_event.clone()));
+
+        // TODO: don't hide to server event behind non-wasm arch flag
+        #[derive(serde::Serialize)]
+        #[serde(tag = "type", rename_all = "camelCase")]
+        enum Event {
+            RequestFullState { name: String },
+        }
+        env::send_event_to_server(&Event::RequestFullState {
+            name: T::name().to_string(),
+        })
+        .unwrap();
+
+        state_event
+    }
+}
+
+pub fn use_state_event<M: Clone + Copy + 'static, T: Stateful + Valuable<M> + Clone + 'static>(
     _: T,
 ) -> StateEvent<T, M>
 where
@@ -442,7 +393,10 @@ where
 // }
 
 // TODO: don't allow further `on_update` calls after this one (or allow chaining them?)
-pub fn use_cookie<M: Clone + 'static, T: Stateful + Valuable<M> + CookieEvent + Clone + 'static>(
+pub fn use_cookie<
+    M: Clone + Copy + 'static,
+    T: Stateful + Valuable<M> + CookieEvent + Clone + 'static,
+>(
     event: T,
 ) -> StateEvent<T, M>
 where
@@ -490,6 +444,7 @@ pub static CURRENT_SCOPE_DOM_ID: AtomicU32 = AtomicU32::new(0);
 pub static PERSISTENT_VALUES: PersistentState = PersistentState {
     cell: LazyCell::new(|| RefCell::new(HashMap::new())),
     event_subscriptions: LazyCell::new(|| RefCell::new(HashMap::new())),
+    partial_event_subscriptions: LazyCell::new(|| RefCell::new(HashMap::new())),
     builders: LazyCell::new(|| RefCell::new(HashMap::new())),
     built_nodes: LazyCell::new(|| RefCell::new(HashMap::new())),
     to_re_render: LazyCell::new(|| RefCell::new(HashSet::new())),

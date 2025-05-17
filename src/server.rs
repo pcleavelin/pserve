@@ -29,6 +29,8 @@ pub use tokio;
 pub use tracing;
 pub use tracing_subscriber;
 
+use crate::dom::{DomNodeBuilder, DomNodeUnbuiltBody};
+
 // pub type StateProcessorFnDyn<T> = dyn Fn(&mut T, SocketAddr, String) -> Option<Event> + Send + Sync;
 // pub type ProcessorFnDyn<T> =
 //     dyn Fn(&mut T, SocketAddr, serde_json::Value) -> Option<Event> + Send + Sync;
@@ -320,7 +322,6 @@ impl<T: Default + Send + Sync + 'static> App<T> {
         }
 
         let app = Router::new()
-            // .route("/", get(index))
             .route(
                 "/client.wasm",
                 get(move || async move {
@@ -348,8 +349,71 @@ impl<T: Default + Send + Sync + 'static> App<T> {
     }
 }
 
-async fn index() -> Html<&'static str> {
-    Html(include_str!("html/index.html"))
+async fn index<T: Send + Sync>(State(state): State<Arc<ApiState<T>>>) -> Html<String> {
+    let builder = DomNodeBuilder::default().push("html", || {
+        DomNodeBuilder::default()
+            .push("head", || {
+                DomNodeBuilder::default()
+                    .push("title", || "Hello World this is different".into())
+                    .push("script", || include_str!("html/runtime.js").into())
+                    .attr("type", "text/javascript")
+                    .push("link", || "".into())
+                    .attr("rel", "stylesheet")
+                    .attr(
+                        "href",
+                        "https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css",
+                    )
+            })
+            .push("body", || {
+                DomNodeBuilder::default()
+                    .push("p", || "Disconnected".into())
+                    .attr("id", "status")
+            })
+            .push("p", || "Loading wasm blob".into())
+            .attr("id", "loading-text")
+            .push("div", || "".into())
+            .attr("data-pserve-id", "test")
+    });
+
+    Html(render(builder))
+}
+
+fn render(builder: DomNodeBuilder) -> String {
+    let mut string = String::new();
+
+    for builder in builder.children {
+        {
+            if !builder.tag.is_empty() {
+                string.push_str(&format!("<{}", builder.tag));
+            }
+
+            for (attr, value) in &builder.attributes {
+                if value.is_empty() {
+                    string.push_str(&format!(" {attr} "));
+                } else {
+                    string.push_str(&format!(" {attr}='{value}' "));
+                }
+            }
+
+            if !builder.tag.is_empty() {
+                string.push('>');
+            }
+        }
+
+        match &builder.body {
+            Some(DomNodeUnbuiltBody::Text(text)) => string.push_str(text),
+            Some(DomNodeUnbuiltBody::Constructor(ctor)) => {
+                string.push_str(&render(ctor()));
+            }
+            None => {}
+        }
+
+        if !builder.tag.is_empty() {
+            string.push_str(&format!("</{}>", builder.tag));
+        }
+    }
+
+    string
 }
 
 // TODO: grab user context

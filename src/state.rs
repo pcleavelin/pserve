@@ -39,6 +39,7 @@ pub trait Stateful: Sized {
 
 pub trait SettableEvent {
     fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
     fn set(&mut self, value: serde_json::Value);
 }
 
@@ -95,11 +96,43 @@ where
 }
 
 #[derive(Clone, Copy)]
-pub struct StateEvent<T: Stateful + Clone + 'static, M: Clone>
+pub struct StateEvent<T: Stateful + Clone + 'static, M: Clone + Copy>
 where
     <T as Stateful>::Data: DeserializeOwned + Default + Clone,
 {
     pub(crate) data: Signal<StateInner<T, M>, T::Key>,
+}
+
+#[derive(Clone, Copy)]
+pub struct PartialStateEvent<T: MultipleValueUpdate + Clone + 'static>
+where
+    <T as Stateful>::Data: InnerCollection + DeserializeOwned + Default + Clone,
+    <T::Data as InnerCollection>::Key: Serialize + DeserializeOwned,
+    <T::Data as InnerCollection>::Inner: Serialize + DeserializeOwned,
+{
+    pub(crate) data: Signal<PartialStateInner<T>, T::Key>,
+}
+
+#[derive(Clone)]
+pub struct PartialStateInner<T: MultipleValueUpdate + Clone + 'static>
+where
+    <T as Stateful>::Data: InnerCollection + DeserializeOwned + Default + Clone,
+    <T::Data as InnerCollection>::Key: Serialize + DeserializeOwned,
+    <T::Data as InnerCollection>::Inner: Serialize + DeserializeOwned,
+{
+    pub(crate) key: <T::Data as InnerCollection>::Key,
+    pub(crate) data: <T::Data as InnerCollection>::Inner,
+}
+
+impl<T: MultipleValueUpdate + Clone> PartialStateEvent<T>
+where
+    <T as Stateful>::Data: InnerCollection + DeserializeOwned + Default + Clone,
+    <T::Data as InnerCollection>::Key: Serialize + DeserializeOwned,
+    <T::Data as InnerCollection>::Inner: Serialize + DeserializeOwned,
+{
+    pub fn get(&self) -> <T::Data as InnerCollection>::Inner {
+        self.data.get().data
+    }
 }
 
 type MultipleValueUpdateArray<T> =
@@ -225,6 +258,10 @@ where
         self
     }
 
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
     fn set(&mut self, value: serde_json::Value) {
         let keys = if let Ok(value) =
             serde_json::from_value::<StatefulClientEvent<T, T::Data>>(value.clone())
@@ -273,6 +310,10 @@ where
         self
     }
 
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
     fn set(&mut self, value: serde_json::Value) {
         let keys = if let Ok(value) = serde_json::from_value::<
             StatefulClientEvent<T, MultipleValueUpdateArray<T::Data>>,
@@ -314,6 +355,69 @@ where
 
             if let Some(on_update) = self.data.get().on_update {
                 on_update(&self.data.get().inner);
+            }
+        }
+    }
+}
+
+impl<T: MultipleValueUpdate + Clone> SettableEvent for PartialStateEvent<T>
+where
+    <T as Stateful>::Data: InnerCollection + DeserializeOwned + Default + Clone,
+    <T::Data as InnerCollection>::Key: Serialize + DeserializeOwned + PartialEq<T::Key> + PartialEq,
+    <T::Data as InnerCollection>::Inner: Serialize + DeserializeOwned,
+    T::Key: PartialEq<<T::Data as InnerCollection>::Key>,
+{
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn set(&mut self, value: serde_json::Value) {
+        let our_key = if let Ok(value) = serde_json::from_value::<
+            StatefulClientEvent<T, MultipleValueUpdateArray<T::Data>>,
+        >(value.clone())
+        {
+            if value.state_key == T::name() {
+                let data = self.data.get_mut();
+                if let Some(value) = value
+                    .event
+                    .iter()
+                    .find(|(event_key, _)| *event_key == data.key)
+                    .map(|(_, event_value)| event_value)
+                {
+                    data.data = value.clone();
+                    data.key.clone()
+                } else {
+                    return;
+                }
+            } else {
+                // This wasn't the state we were looking for
+                return;
+            }
+        } else {
+            #[cfg(target_arch = "wasm32")]
+            crate::client::env::log(&format!("failed to deserialize multiple value update"));
+            return;
+        };
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Ok(mut to_re_render) = PERSISTENT_VALUES.to_re_render.try_borrow_mut() {
+                unsafe {
+                    for dom_id in (*self.data.inner).registered_dom_nodes.iter().cloned() {
+                        to_re_render.insert(dom_id);
+                    }
+                    for (_, dom_id) in (*self.data.inner)
+                        .registered_dom_nodes_by_key
+                        .iter()
+                        .filter(|(key, _)| our_key == **key)
+                    {
+                        to_re_render.insert(*dom_id);
+                    }
+                }
             }
         }
     }

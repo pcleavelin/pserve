@@ -2,16 +2,16 @@ use std::collections::HashMap;
 
 #[derive(Default)]
 pub struct DomNodeBuilder {
-    children: Vec<DomNodeUnbuilt>,
+    pub(crate) children: Vec<DomNodeUnbuilt>,
 }
 
 pub struct DomNodeUnbuilt {
-    pub id: u32,
-    pub tag: &'static str,
-    pub attributes: Vec<(String, String)>,
-    pub body: Option<DomNodeUnbuiltBody>,
-    pub on_input: Option<Box<Box<dyn Fn(&str)>>>,
-    pub on_click: Option<Box<Box<dyn Fn(&str)>>>,
+    pub(crate) id: u32,
+    pub(crate) tag: &'static str,
+    pub(crate) attributes: Vec<(String, String)>,
+    pub(crate) body: Option<DomNodeUnbuiltBody>,
+    pub(crate) on_input: Option<Box<Box<dyn Fn(&str)>>>,
+    pub(crate) on_click: Option<Box<Box<dyn Fn(&str)>>>,
 }
 
 pub struct DomNodeBuilt {
