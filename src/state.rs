@@ -1,18 +1,10 @@
-use std::{
-    any::{Any, TypeId},
-    cell::{LazyCell, RefCell},
-    collections::HashMap,
-    hash::Hash,
-    marker::PhantomData,
-};
-
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::json;
+use std::{any::Any, collections::HashMap, hash::Hash, marker::PhantomData};
 
 use crate::signal::Signal;
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::server::{Event, ToClientEvent};
+use crate::server::ToClientEvent;
 
 #[cfg(target_arch = "wasm32")]
 use crate::client::PERSISTENT_VALUES;

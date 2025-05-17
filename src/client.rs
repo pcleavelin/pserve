@@ -2,23 +2,17 @@ extern crate alloc;
 
 use crate::dom::{DomNodeBuilt, DomNodeBuiltBody, DomNodeUnbuilt, DomNodeUnbuiltBody};
 use crate::signal::{Signal, SignalData};
-use crate::state::{
-    InnerCollection, InnerUpdate, MultipleValueUpdate, SettableEvent, StateEvent, StateInner,
-    Stateful, Valuable,
-};
-use alloc::rc::Rc;
+use crate::state::{SettableEvent, StateEvent, StateInner, Stateful, Valuable};
 use core::{
     any::Any,
     cell::{LazyCell, Ref, RefCell, RefMut},
     panic::Location,
     sync::atomic::{AtomicU32, Ordering},
 };
-use serde::{Serialize, de::DeserializeOwned};
+use serde::de::DeserializeOwned;
 use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::marker::PhantomData;
-use std::str::FromStr;
 
 pub mod env {
     use serde::Serialize;
@@ -363,7 +357,7 @@ where
 // }
 
 pub fn use_state_event<M: Clone + 'static, T: Stateful + Valuable<M> + Clone + 'static>(
-    event: T,
+    _: T,
 ) -> StateEvent<T, M>
 where
     StateEvent<T, M>: SettableEvent,
@@ -511,12 +505,6 @@ pub fn persist_value<T: Clone + 'static>(f: impl FnOnce() -> T, location: Locati
         values.insert(location, Box::new(value.clone()));
         value
     }
-}
-
-#[track_caller]
-fn persist_value_here<T: Clone + 'static>(f: impl FnOnce() -> T) -> T {
-    let location = Location::caller();
-    persist_value(f, *location)
 }
 
 pub fn next_dom_id() -> u32 {

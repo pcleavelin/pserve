@@ -1,5 +1,4 @@
 use pserve::server::tokio;
-use pserve::server::tracing;
 use pserve::server::tracing_subscriber::{self, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[dotenvy::load]
