@@ -478,7 +478,6 @@ where
         .unwrap();
     });
 
-    // FIXME: need to figure out to `set` should work with `StatefulClientEvent`
     if let Some(cookie) = env::get_cookie(T::cookie_name()) {
         let value = serde_json::from_str(&cookie).unwrap();
         state_event.set(value);
