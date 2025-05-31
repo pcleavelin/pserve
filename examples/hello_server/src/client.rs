@@ -1,6 +1,7 @@
-use pserve::client::{use_signal, use_state_event};
+use pserve::client::{use_signal, use_state_event, PERSISTENT_VALUES};
 use pserve::dom::*;
 use pserve::signal::Signal;
+use pserve::ui::*;
 
 use crate::{CheckBoxStateEvent, ClientEvent, MemeListStateEvent, NUMBER_OF_CHECKBOXES};
 
@@ -9,36 +10,47 @@ macro_rules! component_handler {
         // TODO: figure out away to not have to make users create this function themselves
         #[unsafe(no_mangle)]
         extern "C" fn js_render_component(fn_name: *mut u8, len: usize) -> *const u8 {
-            let fn_name = unsafe { String::from_raw_parts(fn_name, len, len) };
+            // let fn_name = unsafe { String::from_raw_parts(fn_name, len, len) };
 
-            match render_component(&fn_name) {
-                Some(html) => unsafe {
-                    pserve::client::RENDER_RESULT = pserve::client::RenderResult::from(html);
-                    &raw const pserve::client::RENDER_RESULT as *const _ as *const u8
-                },
-                None => std::ptr::null(),
+            // match render_component(&fn_name) {
+            //     Some(html) => unsafe {
+            //         pserve::client::RENDER_RESULT = pserve::client::RenderResult::from(html);
+            //         &raw const pserve::client::RENDER_RESULT as *const _ as *const u8
+            //     },
+            //     None => std::ptr::null(),
+            // }
+
+            let mut ui_state = PERSISTENT_VALUES.ui_state.borrow_mut();
+            ui_state.reset();
+            root(&mut ui_state);
+            ui_state.compute_layout();
+
+            unsafe {
+                pserve::client::RENDER_RESULT = pserve::client::RenderResult::from(pserve::client::render_ui_state(&ui_state));
             }
+
+            &raw const pserve::client::RENDER_RESULT as *const _ as *const u8
         }
 
-        fn render_component(msg: &str) -> Option<String> {
-            pserve::client::env::log(&msg);
+        // fn render_component(msg: &str) -> Option<String> {
+        //     pserve::client::env::log(&msg);
 
-            match msg {
-                $($name => {
-                    let built = $component().build(
-                        &mut pserve::client::PERSISTENT_VALUES.get_builders_mut(),
-                        &mut pserve::client::PERSISTENT_VALUES.get_built_nodes_mut(),
-                        true,
-                    );
+        //     match msg {
+        //         $($name => {
+        //             let built = $component().build(
+        //                 &mut pserve::client::PERSISTENT_VALUES.get_builders_mut(),
+        //                 &mut pserve::client::PERSISTENT_VALUES.get_built_nodes_mut(),
+        //                 true,
+        //             );
 
-                    Some(pserve::client::render_multi(built))
-                })*
-                _ => {
-                    pserve::client::env::log("unknown component");
-                    None
-                }
-            }
-        }
+        //             Some(pserve::client::render_multi(built))
+        //         })*
+        //         _ => {
+        //             pserve::client::env::log("unknown component");
+        //             None
+        //         }
+        //     }
+        // }
     };
 }
 
@@ -47,6 +59,31 @@ component_handler! {
     "meme_list" => meme_list,
     "server_communicator" => server_communicator,
     "checkboxes" => checkboxes,
+}
+
+fn root(ui_state: &mut State) {
+    ui_state.open_element(ElementKind::Container, Direction::LeftToRight.into());
+    {
+        ui_state.open_element(ElementKind::Text("Hello, World!".to_string()), Layout::default());
+        ui_state.close_element();
+
+        ui_state.open_element(ElementKind::Text("I am an item".to_string()), Layout::default());
+        ui_state.close_element();
+
+        ui_state.open_element(ElementKind::Container, Direction::TopToBottom.into());
+        {
+            ui_state.open_element(ElementKind::Text("Top".to_string()), Layout::default());
+            ui_state.close_element();
+
+            ui_state.open_element(ElementKind::Text("Middle".to_string()), Layout::default());
+            ui_state.close_element();
+
+            ui_state.open_element(ElementKind::Text("Bottom".to_string()), Layout::default());
+            ui_state.close_element();
+        }
+        ui_state.close_element();
+    }
+    ui_state.close_element();
 }
 
 fn server_communicator() -> DomNodeBuilder {

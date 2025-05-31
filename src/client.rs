@@ -6,6 +6,7 @@ use crate::state::{
     InnerCollection, MultipleValueUpdate, PartialStateEvent, PartialStateInner, SettableEvent,
     StateEvent, StateInner, Stateful, Valuable,
 };
+use crate::ui::{self, Vector2Like};
 use core::{
     any::Any,
     cell::{LazyCell, Ref, RefCell, RefMut},
@@ -195,6 +196,7 @@ pub struct PersistentState {
     partial_event_subscriptions: LazyCell<RefCell<HashMap<TypeId, Box<dyn SettableEvent>>>>,
     builders: LazyCell<RefCell<HashMap<u32, DomNodeUnbuilt>>>,
     built_nodes: LazyCell<RefCell<HashMap<u32, DomNodeBuilt>>>,
+    pub ui_state: LazyCell<RefCell<ui::State>>,
     pub(crate) to_re_render: LazyCell<RefCell<HashSet<u32>>>,
 }
 
@@ -447,6 +449,7 @@ pub static PERSISTENT_VALUES: PersistentState = PersistentState {
     partial_event_subscriptions: LazyCell::new(|| RefCell::new(HashMap::new())),
     builders: LazyCell::new(|| RefCell::new(HashMap::new())),
     built_nodes: LazyCell::new(|| RefCell::new(HashMap::new())),
+    ui_state: LazyCell::new(|| RefCell::new(ui::State::new())),
     to_re_render: LazyCell::new(|| RefCell::new(HashSet::new())),
 };
 
@@ -536,4 +539,36 @@ pub fn render(dom_id: u32) -> String {
     }
 
     string
+}
+
+pub fn render_ui_state(state: &ui::State) -> String {
+    fn render_ui_state_inner(state: &ui::State, index: usize) -> String {
+        let mut string = String::new();
+
+        for i in 0..state.elements.len {
+            let e = &state.elements.items[i].data;
+
+            string += &format!("<div id={i} style=\"");
+            string += &format!(
+                "position: absolute; transform: translate({}px, {}px); width: {}px; height: {}px; font-size: 16px",
+                e.layout.pos.x(),
+                e.layout.pos.y(),
+                e.layout.size.x().value,
+                e.layout.size.y().value
+            );
+            string += "\">";
+
+            match &e.kind {
+                ui::ElementKind::Container => {}
+                ui::ElementKind::Text(t) => string += t,
+                ui::ElementKind::Image(t) => todo!(),
+            }
+
+            string += "</div>";
+        }
+
+        string
+    }
+
+    render_ui_state_inner(state, 0)
 }
