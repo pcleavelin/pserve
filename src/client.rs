@@ -94,6 +94,13 @@ impl From<String> for RenderResult {
 }
 
 #[unsafe(no_mangle)]
+extern "C" fn register_panic_hook() {
+    std::panic::set_hook(Box::new(|panic_info| {
+        env::log(&format!("panic occurred {panic_info}"))
+    }))
+}
+
+#[unsafe(no_mangle)]
 extern "C" fn alloc_string(len: i32) -> u32 {
     String::with_capacity(len as usize).leak().as_ptr() as u32
 }
@@ -542,33 +549,46 @@ pub fn render(dom_id: u32) -> String {
 }
 
 pub fn render_ui_state(state: &ui::State) -> String {
-    fn render_ui_state_inner(state: &ui::State, index: usize) -> String {
-        let mut string = String::new();
+    let mut string = String::new();
 
-        for i in 0..state.elements.len {
-            let e = &state.elements.items[i].data;
+    for i in 0..state.elements.len {
+        let e = &state.elements.items[i].data;
 
-            string += &format!("<div id={i} style=\"");
-            string += &format!(
-                "position: absolute; transform: translate({}px, {}px); width: {}px; height: {}px; font-size: 16px",
-                e.layout.pos.x(),
-                e.layout.pos.y(),
-                e.layout.size.x().value,
-                e.layout.size.y().value
-            );
-            string += "\">";
+        let element_type = e
+            .user_data
+            .and_then(|index| state.fetch_user_data::<ui::HtmlElementType>(index as usize));
 
-            match &e.kind {
-                ui::ElementKind::Container => {}
-                ui::ElementKind::Text(t) => string += t,
-                ui::ElementKind::Image(t) => todo!(),
-            }
+        // env::log(&format!("{:?}", element_type));
 
-            string += "</div>";
+        string += &match &element_type {
+            Some(ui::HtmlElementType::Button) => format!("<button id={i} style=\""),
+            Some(ui::HtmlElementType::TextBox) => format!("<input id={i} style=\""),
+            Some(ui::HtmlElementType::Link(link)) => format!("<a id={i} href=\"{link}\" style=\""),
+            None => format!("<div id={i} style=\""),
+        };
+
+        string += &format!(
+            "position: absolute; transform: translate({}px, {}px); width: {}px; height: {}px; font-size: 16px",
+            e.layout.pos.x(),
+            e.layout.pos.y(),
+            e.layout.size.x().value,
+            e.layout.size.y().value
+        );
+        string += "\">";
+
+        match &e.kind {
+            ui::ElementKind::Container => {}
+            ui::ElementKind::Text(t) => string += t,
+            ui::ElementKind::Image(t) => todo!(),
         }
 
-        string
+        string += match element_type {
+            Some(ui::HtmlElementType::Button) => "</button>",
+            Some(ui::HtmlElementType::TextBox) => "",
+            Some(ui::HtmlElementType::Link(_)) => "</a>",
+            None => "</div>",
+        };
     }
 
-    render_ui_state_inner(state, 0)
+    string
 }

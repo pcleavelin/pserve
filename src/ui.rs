@@ -1,11 +1,14 @@
+use std::any::TypeId;
+
 pub struct State {
-    pub(crate) elements: Tree<256, Element>,
+    pub elements: Tree<256, Element>,
+    user_data_arena: Vec<u8>,
 }
 
 pub struct Tree<const N: usize, T> {
-    pub(crate) items: Box<[TreeItem<T>; N]>,
+    pub items: Box<[TreeItem<T>; N]>,
     pub(crate) curr_parent: Option<usize>,
-    pub(crate) len: usize,
+    pub len: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -16,7 +19,54 @@ pub struct TreeItem<T> {
     pub(crate) prev: Option<usize>,
     pub(crate) parent: Option<usize>,
 
-    pub(crate) data: T,
+    pub data: T,
+}
+
+#[repr(C, packed)]
+pub(crate) struct UserDataItem<T> {
+    ty: TypeId,
+    data: T,
+}
+
+pub trait Vector2Like<T> {
+    fn x(&self) -> T;
+    fn y(&self) -> T;
+
+    fn x_mut(&mut self) -> &mut T;
+    fn y_mut(&mut self) -> &mut T;
+
+    fn set_zero(&mut self);
+
+    fn sub(&self, other: &Self) -> Self;
+}
+
+impl<T: Default + Copy> Vector2Like<T> for [T; 2]
+where
+    T: std::ops::Sub<Output = T>,
+{
+    fn x(&self) -> T {
+        self[0]
+    }
+
+    fn y(&self) -> T {
+        self[1]
+    }
+
+    fn x_mut(&mut self) -> &mut T {
+        &mut self[0]
+    }
+
+    fn y_mut(&mut self) -> &mut T {
+        &mut self[1]
+    }
+
+    fn set_zero(&mut self) {
+        *self = [T::default(); 2]
+    }
+
+    fn sub(&self, other: &Self) -> Self {
+        [self[0] - self[0], self[1] - self[1]]
+    }
 }
 
 impl<T> TreeItem<T> {
@@ -101,11 +151,23 @@ impl<const N: usize, T: Default + Clone + std::fmt::Debug> Tree<N, T> {
 pub struct Element {
     pub(crate) kind: ElementKind,
     pub(crate) layout: Layout,
+    pub user_data: Option<usize>,
 }
 
 impl Element {
-    pub fn new(kind: ElementKind, layout: Layout) -> Self {
-        Self { kind, layout }
+    pub fn new<T: std::fmt::Debug + 'static>(
+        state: &mut State,
+        kind: ElementKind,
+        layout: Layout,
+        user_data: T,
+    ) -> Self {
+        let user_data_index = state.push_user_data(user_data);
+
+        Self {
+            kind,
+            layout,
+            user_data: user_data_index,
+        }
     }
 }
 
@@ -117,47 +179,6 @@ pub enum ElementKind {
     Image(u32),
     // TODO:
     // Custom
-}
-
-pub trait Vector2Like<T> {
-    fn x(&self) -> T;
-    fn y(&self) -> T;
-
-    fn x_mut(&mut self) -> &mut T;
-    fn y_mut(&mut self) -> &mut T;
-
-    fn set_zero(&mut self);
-
-    fn sub(&self, other: &Self) -> Self;
-}
-
-impl<T: Default + Copy> Vector2Like<T> for [T; 2]
-where
-    T: std::ops::Sub<Output = T>,
-{
-    fn x(&self) -> T {
-        self[0]
-    }
-
-    fn y(&self) -> T {
-        self[1]
-    }
-
-    fn x_mut(&mut self) -> &mut T {
-        &mut self[0]
-    }
-
-    fn y_mut(&mut self) -> &mut T {
-        &mut self[1]
-    }
-
-    fn set_zero(&mut self) {
-        *self = [T::default(); 2]
-    }
-
-    fn sub(&self, other: &Self) -> Self {
-        [self[0] - self[0], self[1] - self[1]]
-    }
 }
 
 #[derive(Default, Clone, Debug)]
@@ -222,15 +243,90 @@ pub struct Interaction {
     // TODO: clicked, hovered, etc.
 }
 
+trait Serialize {
+    fn serialize(&self) -> Vec<u8>;
+    fn deserialize(bytes: &[u8]) -> Self;
+}
+
+#[derive(Debug, Clone)]
+pub enum HtmlElementType {
+    Button,
+    TextBox,
+    Link(String),
+}
+
+impl Serialize for HtmlElementType {
+    fn serialize(&self) -> Vec<u8> {
+
+    }
+    fn deserialize(bytes: &[u8]) -> Self {
+
+    }
+}
+
 impl State {
     pub fn new() -> Self {
         Self {
             elements: Tree::new(),
+            user_data_arena: Vec::new(),
         }
+    }
+
+    fn push_user_data<T: std::fmt::Debug + 'static>(&mut self, user_data: T) -> Option<usize> {
+        if TypeId::of::<T>() == TypeId::of::<()>() {
+            return None;
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        crate::client::env::log(&format!("{user_data:?}"));
+
+        let item = UserDataItem {
+            ty: TypeId::of::<T>(),
+            data: user_data,
+        };
+
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                &item as *const UserDataItem<T> as *const u8,
+                std::mem::size_of::<UserDataItem<T>>(),
+            )
+        };
+
+        let index = self.user_data_arena.len();
+        self.user_data_arena.extend_from_slice(bytes);
+
+        Some(index)
+    }
+
+    pub fn fetch_user_data<T: std::fmt::Debug + Clone + 'static>(&self, index: usize) -> Option<T> {
+        unsafe {
+            let slice = self.user_data_arena[index..].as_ptr();
+            let item: *const UserDataItem<T> = std::mem::transmute(slice);
+
+            let ty_ptr = &raw const (*item).ty;
+            let data_ptr = &raw const (*item).data;
+            let ty = std::ptr::read_unaligned(ty_ptr);
+
+            if ty == TypeId::of::<T>() {
+                let _data = std::ptr::read_unaligned(data_ptr);
+                let data = _data.clone();
+                std::mem::forget(_data);
+
+                return Some(data);
+            } else {
+                #[cfg(target_arch = "wasm32")]
+                crate::client::env::log(&format!("type is not {:?}", TypeId::of::<T>()));
+                #[cfg(not(target_arch = "wasm32"))]
+                println!("type is not {:?}", TypeId::of::<T>());
+            }
+        }
+
+        None
     }
 
     pub fn reset(&mut self) {
         self.elements.clear();
+        self.user_data_arena.clear();
     }
 
     pub fn compute_layout(&mut self) {
@@ -309,7 +405,6 @@ impl State {
         }
 
         if num_growing.x() > 0 || num_growing.y() > 0 {
-            // dumb way of not doing a memory allocation here
             let remaining_size = [
                 e.data.layout.size.x().value - children_size.x(),
                 e.data.layout.size.y().value - children_size.y(),
@@ -369,12 +464,12 @@ impl State {
         }
     }
 
-    pub fn open_element(&mut self, kind: ElementKind, layout: Layout) {
-        self.elements.push(Element::new(kind, layout));
+    pub fn open_element<T: std::fmt::Debug + 'static>(&mut self, kind: ElementKind, layout: Layout, user_data: T) {
+        let e = Element::new(self, kind, layout, user_data);
+        self.elements.push(e);
     }
 
     pub fn close_element(&mut self) -> Interaction {
-        // TODO: change this to a proper impl on `Tree`
         let mut e = self.elements.curr_parent();
         e.layout.size.set_zero();
 

@@ -108,10 +108,12 @@ const importObj = {
 
 (async () => {
     const response = await fetch("/client.wasm");
-    const result = 
+    const result =
         await WebAssembly.instantiateStreaming(response, importObj);
     instance = result.instance;
     console.log(instance);
+
+    instance.exports.register_panic_hook();
 
     // TODO: allow this to be customized (via custom html/js, no wasm here)
     const e = document.getElementById("loading-text");

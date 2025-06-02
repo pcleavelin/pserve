@@ -1,4 +1,4 @@
-use pserve::client::{use_signal, use_state_event, PERSISTENT_VALUES};
+use pserve::client::{PERSISTENT_VALUES, use_signal, use_state_event};
 use pserve::dom::*;
 use pserve::signal::Signal;
 use pserve::ui::*;
@@ -26,7 +26,8 @@ macro_rules! component_handler {
             ui_state.compute_layout();
 
             unsafe {
-                pserve::client::RENDER_RESULT = pserve::client::RenderResult::from(pserve::client::render_ui_state(&ui_state));
+                pserve::client::RENDER_RESULT =
+                    pserve::client::RenderResult::from(pserve::client::render_ui_state(&ui_state));
             }
 
             &raw const pserve::client::RENDER_RESULT as *const _ as *const u8
@@ -62,23 +63,39 @@ component_handler! {
 }
 
 fn root(ui_state: &mut State) {
-    ui_state.open_element(ElementKind::Container, Direction::LeftToRight.into());
+    ui_state.open_element(ElementKind::Container, Direction::LeftToRight.into(), ());
     {
-        ui_state.open_element(ElementKind::Text("Hello, World!".to_string()), Layout::default());
+        ui_state.open_element(
+            ElementKind::Text("Hello, World!".to_string()),
+            Layout::default(),
+            (),
+        );
         ui_state.close_element();
 
-        ui_state.open_element(ElementKind::Text("I am an item".to_string()), Layout::default());
+        ui_state.open_element(
+            ElementKind::Text("I am an item".to_string()),
+            Layout::default(),
+            HtmlElementType::Link("https://google.com".to_string()),
+        );
         ui_state.close_element();
 
-        ui_state.open_element(ElementKind::Container, Direction::TopToBottom.into());
+        ui_state.open_element(ElementKind::Container, Direction::TopToBottom.into(), ());
         {
-            ui_state.open_element(ElementKind::Text("Top".to_string()), Layout::default());
+            ui_state.open_element(ElementKind::Text("Top".to_string()), Layout::default(), ());
             ui_state.close_element();
 
-            ui_state.open_element(ElementKind::Text("Middle".to_string()), Layout::default());
+            ui_state.open_element(
+                ElementKind::Text("I am actually a button".to_string()),
+                Layout::default(),
+                HtmlElementType::Button,
+            );
             ui_state.close_element();
 
-            ui_state.open_element(ElementKind::Text("Bottom".to_string()), Layout::default());
+            ui_state.open_element(
+                ElementKind::Text("Bottom".to_string()),
+                Layout::default(),
+                (),
+            );
             ui_state.close_element();
         }
         ui_state.close_element();
