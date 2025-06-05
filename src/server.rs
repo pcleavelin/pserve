@@ -357,12 +357,12 @@ async fn index<T: Send + Sync>(State(state): State<Arc<ApiState<T>>>) -> Html<St
                     .push("title", || "Hello World this is different".into())
                     .push("script", || include_str!("html/runtime.js").into())
                     .attr("type", "text/javascript")
-                    .push("link", || "".into())
-                    .attr("rel", "stylesheet")
-                    .attr(
-                        "href",
-                        "https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css",
-                    )
+                // .push("link", || "".into())
+                // .attr("rel", "stylesheet")
+                // .attr(
+                //     "href",
+                //     "https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css",
+                // )
             })
             .push("body", || {
                 DomNodeBuilder::default()

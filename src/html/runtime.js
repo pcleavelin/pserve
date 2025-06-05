@@ -74,6 +74,14 @@ const importObj = {
                 e.outerHTML = msg;
             }
         },
+        push_dom: (dom_id, ptr, len) => {
+            const msg = read_string(instance, ptr, len);
+            // s.send(JSON.stringify({type: "domUpdate", domId: dom_id, html: msg}));
+            const e = document.querySelector(`[data-pserve-id="test"]`);
+            if (!!e) {
+                e.insertAdjacentHTML("beforeend", msg);
+            }
+        },
         update_cookie: (ptr, len) => {
             const msg = read_string(instance, ptr, len);
             document.cookie = msg;
@@ -119,13 +127,33 @@ const importObj = {
     const e = document.getElementById("loading-text");
     e.parentNode.removeChild(e);
 
-    s.send(JSON.stringify({type: "pageLoad", path: window.location.pathname, params: window.location.search}));
+    // s.send(JSON.stringify({type: "pageLoad", path: window.location.pathname, params: window.location.search}));
+    // renderComponentAt(instance, "home_page", "test", "");
+
+    const render = (timestamp) => {
+        // console.log("render");
+        instance.exports.js_render();
+
+        requestAnimationFrame(render);
+        // setTimeout(render, 200);
+    };
+    requestAnimationFrame(render) 
+    // render();
 })();
 
 function call_wasm_fn_ptr(value, ptr) {
     const value_str = write_string(instance, value);
     instance.exports.call_fn_ptr(...Object.values(value_str), ptr);
     instance.exports.rerender();
+}
+
+function clicky(domId, value) {
+    instance.exports.clicky(domId, value);
+}
+
+function inputness(domId, value) {
+    const value_str = write_string(instance, value);
+    instance.exports.inputness(domId, ...Object.values(value_str));
 }
 
 function handle_custom_event(msg) {
@@ -148,7 +176,7 @@ function renderComponentAt(instance, component_name, domId, params) {
     const str_len = view.getInt32(result_ptr + 4, true);
 
     const str = read_string(instance, str_ptr, str_len);
-    //console.log(str);
+    console.log(str);
 
     const e = document.querySelector(`[data-pserve-id="${domId}"]`);
     e.innerHTML = str;

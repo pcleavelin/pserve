@@ -9,7 +9,12 @@ macro_rules! component_handler {
     ($($name:literal => $component:ident),* $(,)?) => {
         // TODO: figure out away to not have to make users create this function themselves
         #[unsafe(no_mangle)]
-        extern "C" fn js_render_component(fn_name: *mut u8, len: usize) -> *const u8 {
+        extern "C" fn js_render_component(
+            fn_name: *mut u8,
+            len: usize,
+            _: *mut u8,
+            _: usize,
+        ) -> *const u8 {
             // let fn_name = unsafe { String::from_raw_parts(fn_name, len, len) };
 
             // match render_component(&fn_name) {
@@ -21,7 +26,7 @@ macro_rules! component_handler {
             // }
 
             let mut ui_state = PERSISTENT_VALUES.ui_state.borrow_mut();
-            ui_state.reset();
+            ui_state.next_frame();
             root(&mut ui_state);
             ui_state.compute_layout();
 
@@ -62,8 +67,23 @@ component_handler! {
     "checkboxes" => checkboxes,
 }
 
+#[unsafe(no_mangle)]
+extern "C" fn js_render() {
+    let mut ui_state = PERSISTENT_VALUES.ui_state.borrow_mut();
+    ui_state.next_frame();
+    root(&mut ui_state);
+    ui_state.compute_layout();
+
+    pserve::client::render_ui_state(&ui_state);
+}
+
 fn root(ui_state: &mut State) {
-    ui_state.open_element(ElementKind::Container, Direction::LeftToRight.into(), ());
+    thread_local! {
+        static COUNTER: std::cell::Cell<u32> = std::cell::Cell::new(0);
+        static show_list: std::cell::Cell<bool> = std::cell::Cell::new(false);
+    }
+
+    ui_state.open_element(ElementKind::Container, Direction::TopToBottom.into(), ());
     {
         ui_state.open_element(
             ElementKind::Text("Hello, World!".to_string()),
@@ -77,6 +97,51 @@ fn root(ui_state: &mut State) {
             Layout::default(),
             HtmlElementType::Link("https://google.com".to_string()),
         );
+        ui_state.close_element();
+
+        ui_state.open_element(
+            ElementKind::Text("Blah blah blah".to_string()),
+            Layout::default(),
+            HtmlElementType::Link("https://google.com".to_string()),
+        );
+        ui_state.close_element();
+
+        ui_state.open_element(ElementKind::Container, Direction::LeftToRight.into(), ());
+        ui_state.open_element(
+            ElementKind::Text(
+                if show_list.get() {
+                    "Hide list"
+                } else {
+                    "Show list"
+                }
+                .to_string(),
+            ),
+            Layout::default(),
+            HtmlElementType::Button,
+        );
+        if ui_state.close_element().clicked {
+            show_list.set(!show_list.get());
+        }
+
+        {
+            if show_list.get() {
+                let count = COUNTER.get();
+                for i in 0..COUNTER.get() {
+                    ui_state.open_element(
+                        ElementKind::Text(format!("I am an item {i}").to_string()),
+                        Layout::default(),
+                        (),
+                    );
+                    ui_state.close_element();
+                }
+
+                if count < 20 {
+                    COUNTER.set(count + 1);
+                } else {
+                    COUNTER.set(0);
+                }
+            }
+        }
         ui_state.close_element();
 
         ui_state.open_element(ElementKind::Container, Direction::TopToBottom.into(), ());

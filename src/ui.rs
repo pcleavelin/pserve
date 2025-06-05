@@ -1,12 +1,25 @@
-use std::any::TypeId;
+use std::{any::TypeId, ops::{Deref, Not}};
 
 pub struct State {
     pub elements: Tree<256, Element>,
-    user_data_arena: Vec<u8>,
+    user_data_arena: GenericArena,
+
+    pub last_frame_elements: Tree<256, Element>,
+    last_frame_user_data_arena: GenericArena,
+
+    pub input: [Input; 256],
+    pub last_input: [Input; 256],
 }
 
+#[derive(Default, Clone)]
+pub struct Input {
+    pub mouse_down: bool,
+    pub inputted_text: String,
+}
+
+#[derive(Clone)]
 pub struct Tree<const N: usize, T> {
-    pub items: Box<[TreeItem<T>; N]>,
+    items: Box<[TreeItem<T>; N]>,
     pub(crate) curr_parent: Option<usize>,
     pub len: usize,
 }
@@ -20,6 +33,14 @@ pub struct TreeItem<T> {
     pub(crate) parent: Option<usize>,
 
     pub data: T,
+}
+
+impl<T> Deref for TreeItem<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
 }
 
 #[repr(C, packed)]
@@ -65,7 +86,7 @@ where
     }
 
     fn sub(&self, other: &Self) -> Self {
-        [self[0] - self[0], self[1] - self[1]]
+        [self[0] - other[0], self[1] - other[1]]
     }
 }
 
@@ -89,6 +110,18 @@ impl<const N: usize, T: Default + Clone + std::fmt::Debug> Tree<N, T> {
             curr_parent: None,
             len: 0,
         }
+    }
+
+    pub fn get(&self, index: usize) -> Option<&T> {
+        if index < self.len {
+            Some(&self.items[index].data)
+        } else {
+            None
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
     }
 
     pub fn clear(&mut self) {
@@ -147,7 +180,131 @@ impl<const N: usize, T: Default + Clone + std::fmt::Debug> Tree<N, T> {
     }
 }
 
-#[derive(Default, Clone, Debug)]
+pub trait GenericArenaItem {
+    fn cloned_bytes(&self) -> Vec<u8>;
+}
+
+pub struct GenericArena {
+    types: Vec<(TypeId, usize, *const ())>,
+    arena: Vec<u8>,
+}
+
+impl GenericArena {
+    fn new() -> Self {
+        Self {
+            types: Vec::new(),
+            arena: Vec::new(),
+        }
+    }
+
+    fn push<T: GenericArenaItem + 'static>(&mut self, user_data: T) -> Option<usize> {
+        if TypeId::of::<T>() == TypeId::of::<()>() {
+            return None;
+        }
+
+        // trick the compiler into giving us a pointer to T's vtable for GenericArenaItem
+        let vtable = {
+            let fat: &dyn GenericArenaItem = &user_data;
+            let fat_bytes: [usize; 2] = unsafe { std::mem::transmute(fat) };
+
+            fat_bytes
+        }[1] as *const ();
+
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                &user_data as *const T as *const u8,
+                std::mem::size_of::<T>(),
+            )
+        };
+
+        // we have "moved" user_data into the arena, but the compiler doesn't know that so we need
+        // to tell it not to run `drop()` on it
+        std::mem::forget(user_data);
+
+        let byte_index = self.arena.len();
+        let index = self.types.len();
+
+        self.arena.extend_from_slice(bytes);
+        self.types.push((TypeId::of::<T>(), byte_index, vtable));
+
+        Some(index)
+    }
+
+    pub fn get<T: Clone + 'static>(&self, index: usize) -> Option<&T> {
+        let (ty, byte_index, _) = self.types[index];
+        if ty != TypeId::of::<T>() {
+            return None;
+        }
+
+        let slice = self.arena[byte_index..].as_ptr();
+        let item: *const T = unsafe { std::mem::transmute(slice) };
+
+        if ty == TypeId::of::<T>() {
+            unsafe {
+                return Some(&*item);
+            }
+        }
+
+        None
+    }
+
+    pub fn clear(&mut self) {
+        for index in 0..self.types.len() {
+            let item = self.get_dyn(index);
+
+            // run `drop()` on the item
+            let _ = Box::from(item);
+        }
+
+        self.types.clear();
+        self.arena.clear();
+    }
+
+    fn push_raw(&mut self, ty: TypeId, bytes: Vec<u8>, vtable: *const ()) {
+        let byte_index = self.arena.len();
+
+        self.arena.extend(bytes);
+        self.types.push((ty, byte_index, vtable));
+    }
+
+    fn get_dyn(&self, index: usize) -> &dyn GenericArenaItem {
+        let (_, byte_index, vtable) = self.types[index];
+
+        let bytes = self.arena[byte_index..].as_ptr();
+        let fat_bytes: [usize; 2] = [bytes as usize, vtable as usize];
+        let fat_ptr: &dyn GenericArenaItem = unsafe { std::mem::transmute(fat_bytes) };
+
+        fat_ptr
+    }
+
+    fn get_cloned_bytes(&self, index: usize) -> Vec<u8> {
+        let fat_ptr = self.get_dyn(index);
+
+        fat_ptr.cloned_bytes()
+    }
+}
+
+impl Drop for GenericArena {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+impl Clone for GenericArena {
+    fn clone(&self) -> Self {
+        let mut new_arena = Self::new();
+
+        for (index, (ty, _, vtable)) in self.types.iter().enumerate() {
+            let cloned_bytes = self.get_cloned_bytes(index);
+
+            new_arena.push_raw(*ty, cloned_bytes, *vtable);
+        }
+
+        new_arena
+    }
+}
+
+#[derive(Default, Clone, Debug, PartialEq)]
 pub struct Element {
     pub(crate) kind: ElementKind,
     pub(crate) layout: Layout,
@@ -155,13 +312,13 @@ pub struct Element {
 }
 
 impl Element {
-    pub fn new<T: std::fmt::Debug + 'static>(
+    pub fn new<T: GenericArenaItem + std::fmt::Debug + 'static>(
         state: &mut State,
         kind: ElementKind,
         layout: Layout,
         user_data: T,
     ) -> Self {
-        let user_data_index = state.push_user_data(user_data);
+        let user_data_index = state.user_data_arena.push(user_data);
 
         Self {
             kind,
@@ -171,7 +328,7 @@ impl Element {
     }
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, PartialEq)]
 pub enum ElementKind {
     #[default]
     Container,
@@ -181,7 +338,7 @@ pub enum ElementKind {
     // Custom
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, PartialEq)]
 pub struct Layout {
     pub(crate) dir: Direction,
 
@@ -189,7 +346,16 @@ pub struct Layout {
     pub(crate) size: [Size; 2],
 }
 
-#[derive(Default, Clone, Copy, Debug)]
+impl Layout {
+    pub fn size(size: [Size; 2]) -> Self {
+        Self {
+            size,
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Default, Clone, Copy, Debug, PartialEq)]
 pub enum Direction {
     #[default]
     LeftToRight,
@@ -206,10 +372,33 @@ impl From<Direction> for Layout {
     }
 }
 
-#[derive(Default, Clone, Copy, Debug)]
+#[derive(Default, Clone, Copy, Debug, PartialEq)]
 pub struct Size {
     kind: SizeKind,
     pub(crate) value: i32,
+}
+
+impl Size {
+    pub fn exact(value: i32) -> Self {
+        Self {
+            kind: SizeKind::Exact,
+            value,
+        }
+    }
+
+    pub fn grow() -> Self {
+        Self {
+            kind: SizeKind::Grow,
+            value: 0,
+        }
+    }
+
+    pub fn fit() -> Self {
+        Self {
+            kind: SizeKind::Fit,
+            value: 0,
+        }
+    }
 }
 
 impl std::ops::Sub for Size {
@@ -239,13 +428,11 @@ pub enum SizeKind {
 
 #[derive(Default)]
 pub struct Interaction {
-    layout: Layout,
-    // TODO: clicked, hovered, etc.
-}
+    pub layout: Layout,
+    pub clicked: bool,
+    pub inputted_text: String,
 
-trait Serialize {
-    fn serialize(&self) -> Vec<u8>;
-    fn deserialize(bytes: &[u8]) -> Self;
+    // TODO: hovered, etc.
 }
 
 #[derive(Debug, Clone)]
@@ -255,12 +442,20 @@ pub enum HtmlElementType {
     Link(String),
 }
 
-impl Serialize for HtmlElementType {
-    fn serialize(&self) -> Vec<u8> {
+impl<T: Clone> GenericArenaItem for T {
+    fn cloned_bytes(&self) -> Vec<u8>
+    where
+        Self: Sized,
+    {
+        let item = self.clone();
 
-    }
-    fn deserialize(bytes: &[u8]) -> Self {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(unsafe {
+            std::slice::from_raw_parts(&item as *const _ as *const u8, std::mem::size_of::<Self>())
+        });
+        std::mem::forget(item);
 
+        bytes
     }
 }
 
@@ -268,65 +463,30 @@ impl State {
     pub fn new() -> Self {
         Self {
             elements: Tree::new(),
-            user_data_arena: Vec::new(),
+            user_data_arena: GenericArena::new(),
+
+            last_frame_elements: Tree::new(),
+            last_frame_user_data_arena: GenericArena::new(),
+
+            input: core::array::from_fn(|_| Input::default()),
+            last_input: core::array::from_fn(|_| Input::default()),
         }
     }
 
-    fn push_user_data<T: std::fmt::Debug + 'static>(&mut self, user_data: T) -> Option<usize> {
-        if TypeId::of::<T>() == TypeId::of::<()>() {
-            return None;
-        }
+    pub fn next_frame(&mut self) {
+        self.last_frame_elements = self.elements.clone();
+        self.last_frame_user_data_arena = self.user_data_arena.clone();
+        self.last_input = self.input.clone();
 
-        #[cfg(target_arch = "wasm32")]
-        crate::client::env::log(&format!("{user_data:?}"));
-
-        let item = UserDataItem {
-            ty: TypeId::of::<T>(),
-            data: user_data,
-        };
-
-        let bytes = unsafe {
-            std::slice::from_raw_parts(
-                &item as *const UserDataItem<T> as *const u8,
-                std::mem::size_of::<UserDataItem<T>>(),
-            )
-        };
-
-        let index = self.user_data_arena.len();
-        self.user_data_arena.extend_from_slice(bytes);
-
-        Some(index)
-    }
-
-    pub fn fetch_user_data<T: std::fmt::Debug + Clone + 'static>(&self, index: usize) -> Option<T> {
-        unsafe {
-            let slice = self.user_data_arena[index..].as_ptr();
-            let item: *const UserDataItem<T> = std::mem::transmute(slice);
-
-            let ty_ptr = &raw const (*item).ty;
-            let data_ptr = &raw const (*item).data;
-            let ty = std::ptr::read_unaligned(ty_ptr);
-
-            if ty == TypeId::of::<T>() {
-                let _data = std::ptr::read_unaligned(data_ptr);
-                let data = _data.clone();
-                std::mem::forget(_data);
-
-                return Some(data);
-            } else {
-                #[cfg(target_arch = "wasm32")]
-                crate::client::env::log(&format!("type is not {:?}", TypeId::of::<T>()));
-                #[cfg(not(target_arch = "wasm32"))]
-                println!("type is not {:?}", TypeId::of::<T>());
-            }
-        }
-
-        None
-    }
-
-    pub fn reset(&mut self) {
         self.elements.clear();
         self.user_data_arena.clear();
+    }
+
+    pub fn get_user_data<T: GenericArenaItem + std::fmt::Debug + Clone + 'static>(
+        &self,
+        index: usize,
+    ) -> Option<&T> {
+        self.user_data_arena.get(index)
     }
 
     pub fn compute_layout(&mut self) {
@@ -344,13 +504,15 @@ impl State {
                     match parent.data.layout.dir {
                         Direction::LeftToRight => {
                             *e.data.layout.pos.x_mut() =
-                                prev.data.layout.pos.x() + prev.data.layout.size.x().value;
+                                // TODO: change the `8` to a `padding` value
+                                prev.data.layout.pos.x() + prev.data.layout.size.x().value + 8;
                             *e.data.layout.pos.y_mut() = parent.data.layout.pos.y();
                         }
                         Direction::TopToBottom => {
                             *e.data.layout.pos.x_mut() = parent.data.layout.pos.x();
                             *e.data.layout.pos.y_mut() =
-                                prev.data.layout.pos.y() + prev.data.layout.size.y().value;
+                                // TODO: change the `8` to a `padding` value
+                                prev.data.layout.pos.y() + prev.data.layout.size.y().value + 8;
                         }
                     }
                 } else {
@@ -464,19 +626,29 @@ impl State {
         }
     }
 
-    pub fn open_element<T: std::fmt::Debug + 'static>(&mut self, kind: ElementKind, layout: Layout, user_data: T) {
+    fn is_clicked(&self, index: usize) -> bool {
+        self.last_input[index].mouse_down && self.input[index].mouse_down.not()
+    }
+
+    pub fn open_element<T: GenericArenaItem + std::fmt::Debug + 'static>(
+        &mut self,
+        kind: ElementKind,
+        layout: Layout,
+        user_data: T,
+    ) {
         let e = Element::new(self, kind, layout, user_data);
         self.elements.push(e);
     }
 
     pub fn close_element(&mut self) -> Interaction {
         let mut e = self.elements.curr_parent();
-        e.layout.size.set_zero();
 
         {
             let size_x = e.layout.size.x_mut();
             match size_x.kind {
                 SizeKind::Fit => {
+                    size_x.value = 0;
+
                     match &e.kind {
                         ElementKind::Container => {
                             // TODO: turn this into an ergonomic iterator
@@ -489,7 +661,7 @@ impl State {
 
                                     match e.layout.dir {
                                         Direction::LeftToRight => {
-                                            size_x.value += child.data.layout.size.x().value
+                                            size_x.value += child.data.layout.size.x().value + 8
                                         }
                                         Direction::TopToBottom => {
                                             size_x.value =
@@ -515,8 +687,11 @@ impl State {
 
         {
             let size_y = e.layout.size.y_mut();
+
             match size_y.kind {
                 SizeKind::Fit => {
+                    size_y.value = 0;
+
                     match &e.kind {
                         ElementKind::Container => {
                             // TODO: turn this into an ergonomic iterator
@@ -533,7 +708,7 @@ impl State {
                                                 size_y.value.max(child.data.layout.size.y().value)
                                         }
                                         Direction::TopToBottom => {
-                                            size_y.value += child.data.layout.size.y().value
+                                            size_y.value += child.data.layout.size.y().value + 8
                                         }
                                     }
                                 } else {
@@ -555,12 +730,34 @@ impl State {
 
         let interaction = Interaction {
             layout: e.layout.clone(),
-            ..Default::default()
+            clicked: self.is_clicked(self.elements.curr_parent.unwrap()),
+            inputted_text: self.input[self.elements.curr_parent.unwrap()].inputted_text.clone(),
         };
 
         self.elements.update_parent(e);
         self.elements.step_up();
 
         interaction
+    }
+}
+
+pub mod html {
+    use super::*;
+
+    pub trait HtmlExt {
+        fn label(&mut self, text: impl ToString);
+        fn button(&mut self, text: impl ToString) -> Interaction;
+    }
+
+    impl HtmlExt for State {
+        fn label(&mut self, text: impl ToString) {
+            self.open_element(ElementKind::Text(text.to_string()), Layout::default(), ());
+            self.close_element();
+        }
+
+        fn button(&mut self, text: impl ToString) -> Interaction {
+            self.open_element(ElementKind::Text(text.to_string()), Layout::default(), HtmlElementType::Button);
+            self.close_element()
+        }
     }
 }

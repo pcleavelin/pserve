@@ -28,6 +28,7 @@ pub mod env {
             pub fn log(msg: *const u8, len: i32);
 
             pub fn update_dom(dom_id: u32, html: *const u8, len: i32);
+            pub fn push_dom(dom_id: u32, html: *const u8, len: i32);
             pub fn update_cookie(msg: *const u8, len: i32);
             pub fn get_cookie(msg: *const u8, len: i32, cookie_len: *mut i32) -> *const u8;
 
@@ -43,6 +44,9 @@ pub mod env {
     }
     pub fn update_dom(dom_id: u32, html: &str) {
         unsafe { env_js::update_dom(dom_id, html.as_ptr(), html.len() as i32) }
+    }
+    pub fn push_dom(dom_id: u32, html: &str) {
+        unsafe { env_js::push_dom(dom_id, html.as_ptr(), html.len() as i32) }
     }
     // FIXME: set global cookie for the whole domain (instead of just the current path)
     pub fn update_cookie(name: &str, value: impl Serialize) {
@@ -112,6 +116,19 @@ extern "C" fn call_fn_ptr(value: *mut u8, len: i32, ptr: *const Box<dyn Fn(&str)
     let func = unsafe { &*(ptr as *const Box<dyn Fn(&str)>) };
 
     func(&value);
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn clicky(index: i32, value: bool) {
+    let mut ui_state = PERSISTENT_VALUES.ui_state.borrow_mut();
+    ui_state.input[index as usize].mouse_down = value;
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn inputness(index: i32, value: *mut u8, len: i32) {
+    let value = unsafe { String::from_raw_parts(value, len as usize, len as usize) };
+    let mut ui_state = PERSISTENT_VALUES.ui_state.borrow_mut();
+    ui_state.input[index as usize].inputted_text = value;
 }
 
 #[unsafe(no_mangle)]
@@ -551,43 +568,78 @@ pub fn render(dom_id: u32) -> String {
 pub fn render_ui_state(state: &ui::State) -> String {
     let mut string = String::new();
 
-    for i in 0..state.elements.len {
-        let e = &state.elements.items[i].data;
+    // env::log(&format!(
+    //     "rendering ui state with {} elements and {} last frame elements",
+    //     state.elements.len(),
+    //     state.last_frame_elements.len()
+    // ));
 
-        let element_type = e
-            .user_data
-            .and_then(|index| state.fetch_user_data::<ui::HtmlElementType>(index as usize));
+    for i in 0..state.elements.len() {
+        let e = state.elements.get(i).expect("out of bounds");
 
-        // env::log(&format!("{:?}", element_type));
+        let element_string = {
+            let mut string = String::new();
 
-        string += &match &element_type {
-            Some(ui::HtmlElementType::Button) => format!("<button id={i} style=\""),
-            Some(ui::HtmlElementType::TextBox) => format!("<input id={i} style=\""),
-            Some(ui::HtmlElementType::Link(link)) => format!("<a id={i} href=\"{link}\" style=\""),
-            None => format!("<div id={i} style=\""),
+            let element_type = e
+                .user_data
+                .and_then(|index| state.get_user_data::<ui::HtmlElementType>(index as usize));
+
+            let style = format!(
+                "position: absolute; transform: translate({}px, {}px); width: {}px; height: {}px; font-family: TX-02; font-size: 15px",
+                e.layout.pos.x(),
+                e.layout.pos.y(),
+                e.layout.size.x().value,
+                e.layout.size.y().value
+            );
+
+            string += &match &element_type {
+                Some(ui::HtmlElementType::Button) => {
+                    format!(
+                        "<span data-pserve-id={i} style=\"{style}\"><button style=\"font-family: TX-02; font-size: 14px; padding: 0px;\" onmousedown=\"clicky({i}, true)\" onmouseup=\"clicky({i}, false)\">"
+                    )
+                }
+                Some(ui::HtmlElementType::TextBox) => {
+                    format!("<span data-pserve-id={i} style=\"{style}\"><input style=\"width: 100%; height: 100%; font-family: TX-02; font-size: 15px;\" oninput=\"inputness({i}, this.value)\">")
+                }
+                Some(ui::HtmlElementType::Link(link)) => {
+                    format!("<a data-pserve-id={i} href=\"{link}\" style=\"{style}\">")
+                }
+                None => format!("<div data-pserve-id={i} style=\"{style}\">"),
+            };
+
+            match &e.kind {
+                ui::ElementKind::Container => {}
+                ui::ElementKind::Text(t) => string += t,
+                ui::ElementKind::Image(t) => todo!(),
+            }
+
+            string += match element_type {
+                Some(ui::HtmlElementType::Button) => "</button></span>",
+                Some(ui::HtmlElementType::TextBox) => "</span>",
+                Some(ui::HtmlElementType::Link(_)) => "</a>",
+                None => "</div>",
+            };
+
+            string
         };
 
-        string += &format!(
-            "position: absolute; transform: translate({}px, {}px); width: {}px; height: {}px; font-size: 16px",
-            e.layout.pos.x(),
-            e.layout.pos.y(),
-            e.layout.size.x().value,
-            e.layout.size.y().value
-        );
-        string += "\">";
+        if let Some(last_e) = state.last_frame_elements.get(i) {
+            if *e != *last_e {
+                env::update_dom(i as u32, &element_string);
+            }
 
-        match &e.kind {
-            ui::ElementKind::Container => {}
-            ui::ElementKind::Text(t) => string += t,
-            ui::ElementKind::Image(t) => todo!(),
+            continue;
+        } else {
+            env::push_dom(i as u32, &element_string);
         }
 
-        string += match element_type {
-            Some(ui::HtmlElementType::Button) => "</button>",
-            Some(ui::HtmlElementType::TextBox) => "",
-            Some(ui::HtmlElementType::Link(_)) => "</a>",
-            None => "</div>",
-        };
+        string += &element_string;
+    }
+
+    if state.last_frame_elements.len() > state.elements.len() {
+        for i in state.elements.len()..state.last_frame_elements.len() {
+            env::update_dom(i as u32, "");
+        }
     }
 
     string
