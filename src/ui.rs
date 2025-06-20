@@ -353,6 +353,16 @@ impl Layout {
             ..Default::default()
         }
     }
+
+    pub fn grow_x(mut self) -> Self {
+        self.size[0].kind = SizeKind::Grow;
+        self
+    }
+
+    pub fn grow_y(mut self) -> Self {
+        self.size[1].kind = SizeKind::Grow;
+        self
+    }
 }
 
 #[derive(Default, Clone, Copy, Debug, PartialEq)]
@@ -490,6 +500,10 @@ impl State {
     }
 
     pub fn compute_layout(&mut self) {
+        self.elements.items[0].data.layout.size.x_mut().value = 1024;
+        self.elements.items[0].data.layout.size.y_mut().value = 768;
+        self.elements.items[0].data.layout.size.x_mut().kind = SizeKind::Exact;
+        self.elements.items[0].data.layout.size.y_mut().kind = SizeKind::Exact;
         self.grow_children(0);
 
         for i in 0..self.elements.len {
@@ -533,8 +547,18 @@ impl State {
         }
     }
 
+    fn non_fit_parent(&self, index: usize, dir: usize) -> Option<Element> {
+        if self.elements.items[index].data.layout.size[dir].kind == SizeKind::Fit {
+            self.elements.items[index].parent.and_then(|parent| self.non_fit_parent(parent, dir))
+        } else {
+            Some(self.elements.items[index].data.clone())
+        }
+    }
+
     fn grow_children(&mut self, index: usize) {
-        let e = self.elements.items[index].clone();
+        let ee = self.elements.items[index].clone();
+        let Some(x_e) = self.non_fit_parent(index, 0) else { return };
+        let Some(y_e) = self.non_fit_parent(index, 1) else { return };
 
         let mut children_size = [0i32; 2];
         let mut num_growing = [0i32; 2];
@@ -553,12 +577,20 @@ impl State {
                     *num_growing.y_mut() += 1;
                 }
 
-                match e.data.layout.dir {
+                match ee.data.layout.dir {
                     Direction::LeftToRight => {
-                        *children_size.x_mut() += child.data.layout.size.x().value
+                        *children_size.x_mut() += child.data.layout.size.x().value;
+
+                        if children_size.y() < child.data.layout.size.y().value {
+                            *children_size.y_mut() = child.data.layout.size.y().value;
+                        }
                     }
                     Direction::TopToBottom => {
-                        *children_size.y_mut() += child.data.layout.size.y().value
+                        *children_size.y_mut() += child.data.layout.size.y().value;
+
+                        if children_size.x() < child.data.layout.size.x().value {
+                            *children_size.x_mut() = child.data.layout.size.x().value;
+                        }
                     }
                 }
             } else {
@@ -568,8 +600,8 @@ impl State {
 
         if num_growing.x() > 0 || num_growing.y() > 0 {
             let remaining_size = [
-                e.data.layout.size.x().value - children_size.x(),
-                e.data.layout.size.y().value - children_size.y(),
+                x_e.layout.size.x().value - children_size.x(),
+                y_e.layout.size.y().value - children_size.y(),
             ];
 
             let to_grow = [
@@ -592,18 +624,18 @@ impl State {
                     let mut child = self.elements.items[index].clone();
                     child_index = child.next;
 
-                    match e.data.layout.dir {
+                    match ee.data.layout.dir {
                         Direction::LeftToRight => {
                             if let SizeKind::Grow = child.data.layout.size.x().kind {
                                 child.data.layout.size.x_mut().value = to_grow.x();
                             }
                             if let SizeKind::Grow = child.data.layout.size.y().kind {
-                                child.data.layout.size.y_mut().value = remaining_size.y();
+                                child.data.layout.size.y_mut().value = y_e.layout.size.y().value;
                             }
                         }
                         Direction::TopToBottom => {
                             if let SizeKind::Grow = child.data.layout.size.x().kind {
-                                child.data.layout.size.x_mut().value = remaining_size.x();
+                                child.data.layout.size.x_mut().value = x_e.layout.size.x().value;
                             }
                             if let SizeKind::Grow = child.data.layout.size.y().kind {
                                 child.data.layout.size.y_mut().value = to_grow.y();
@@ -611,14 +643,12 @@ impl State {
                         }
                     }
 
-                    let growing = matches!(child.data.layout.size.x().kind, SizeKind::Grow)
-                        || matches!(child.data.layout.size.y().kind, SizeKind::Grow);
+                    // let growing = matches!(child.data.layout.size.x().kind, SizeKind::Grow)
+                    //     || matches!(child.data.layout.size.y().kind, SizeKind::Grow);
 
                     self.elements.update_item(index, child.data);
 
-                    if growing {
-                        self.grow_children(index);
-                    }
+                    self.grow_children(index);
                 } else {
                     break;
                 }
